@@ -28,6 +28,7 @@
 #ifndef _BSD_MACHINE_SPL_H_
 #define _BSD_MACHINE_SPL_H_
 
+#ifdef KERNEL
 #ifndef __ASSEMBLER__
 
 #if !defined(__LP64__) || defined(XNU_KERNEL_PRIVATE)
@@ -60,6 +61,7 @@ extern void	spln(unsigned int level);
 
 #endif /* __ASSEMBLER__ */
 
+#endif /* KERNEL */
 
 
 #endif /* _BSD_MACHINE_SPL_H_ */

@@ -284,6 +284,7 @@ lapic_init(void)
 	/* Set up the lapic_id <-> cpu_number map and add this boot processor */
 	lapic_cpu_map_init();
 	lapic_cpu_map((LAPIC_READ(ID)>>LAPIC_ID_SHIFT)&LAPIC_ID_MASK, 0);
+	current_cpu_datap()->cpu_phys_number = cpu_to_lapic[0];
 	kprintf("Boot cpu local APIC id 0x%x\n", cpu_to_lapic[0]);
 }
 
@@ -443,6 +444,10 @@ lapic_probe(void)
 		 * Re-initialize cpu features info and re-check.
 		 */
 		cpuid_set_info();
+		/* We expect this codepath will never be traversed
+		 * due to EFI enabling the APIC. Reducing the APIC
+		 * interrupt base dynamically is not supported.
+		 */
 		if (cpuid_features() & CPUID_FEATURE_APIC) {
 			printf("Local APIC discovered and enabled\n");
 			lapic_os_enabled = TRUE;
@@ -806,6 +811,10 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 #endif /* CONFIG_COUNTERS */
 		}
 		break;
+	case LAPIC_KICK_INTERRUPT:
+		_lapic_end_of_interrupt();
+		retval = 1;
+		break;
 	}
 
 	return retval;
@@ -949,3 +958,26 @@ lapic_disable_timer(void)
 	}
 }
 
+/* SPI returning the CMCI vector */
+uint8_t
+lapic_get_cmci_vector(void)
+{
+	uint8_t	cmci_vector = 0;
+#if CONFIG_MCA
+	/* CMCI, if available */
+	if (mca_is_cmci_present())
+		cmci_vector = LAPIC_VECTOR(CMCI);
+#endif
+	return cmci_vector;
+}
+
+#if DEBUG
+extern void lapic_trigger_MC(void);
+void
+lapic_trigger_MC(void)
+{
+	/* A 64-bit access to any register will do it. */
+	volatile uint64_t dummy = *(uint64_t *) (void *) LAPIC_MMIO(ID);
+	dummy++;
+}
+#endif

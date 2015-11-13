@@ -1,5 +1,5 @@
 .\"
-.\" Copyright (c) 2008 Apple Inc.  All rights reserved.
+.\" Copyright (c) 2008-2015 Apple Inc.  All rights reserved.
 .\"
 .\" @APPLE_LICENSE_HEADER_START@
 .\" 
@@ -281,6 +281,9 @@ instead of the current state.  Note that some filters may automatically
 set this flag internally.
 .It EV_EOF
 Filters may set this flag to indicate filter-specific EOF condition.
+.It EV_OOBAND
+Read filter on socket may set this flag to indicate the presence of out of
+band data on the descriptor.
 .It EV_ERROR
 See
 .Sx RETURN VALUES
@@ -328,6 +331,12 @@ and specifying the new low water mark in
 On return,
 .Va data
 contains the number of bytes of protocol data available to read.
+.Pp
+The presence of EV_OOBAND in
+.Va flags ,
+indicates the presence of out of band data on the socket
+.Va data
+equal to the potential number of OOB bytes availble to read.
 .Pp
 If the read direction of the socket has shutdown, then the filter
 also sets EV_EOF in
@@ -450,7 +459,7 @@ or similar call.
 .It NOTE_REAP
 The process was reaped by the parent via
 .Xr wait 2
-or similar call.
+or similar call. Deprecated, use NOTE_EXIT.
 .El
 .Pp
 On return,
@@ -499,6 +508,12 @@ data is in microseconds
 data is in nanoseconds
 .It NOTE_ABSOLUTE
 data is an absolute timeout
+.It NOTE_CRITICAL
+system makes a best effort to fire this timer as scheduled.
+.It NOTE_BACKGROUND
+system has extra leeway to coalesce this timer.
+.It NOTE_LEEWAY
+ext[1] holds user-supplied slop in deadline for timer coalescing.
 .El
 .Pp
 If fflags is not set, the default is milliseconds. The timer will be periodic unless EV_ONESHOT is specified.

@@ -73,7 +73,7 @@ __BEGIN_DECLS
 extern void	Assert(
 	const char	*file,
 	int		line,
-	const char	*expression);
+	const char	*expression) __attribute__((noinline));
 
 #if CONFIG_NO_PANIC_STRINGS
 #define Assert(file, line, ex) (Assert)("", line, "")
@@ -83,10 +83,8 @@ __END_DECLS
 
 #if	MACH_ASSERT
 
-#undef assert
-
 #define assert(ex)  \
-	((ex) ? (void)0 : Assert(__FILE__, __LINE__, # ex))
+	(__builtin_expect(!!((long)(ex)), 1L) ? (void)0 : Assert(__FILE__, __LINE__, # ex))
 #define	assert_static(x)	assert(x)
 
 #define __assert_only

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -59,21 +59,9 @@
 
 #define COMMPAGE_DESCRIPTOR_NAME(label)  _commpage_ ## label
 
-#if defined (__i386__)
-
-#define COMMPAGE_DESCRIPTOR_FIELD_POINTER .long
-#define COMMPAGE_DESCRIPTOR_REFERENCE(label) \
-	.long COMMPAGE_DESCRIPTOR_NAME(label)
-
-#elif defined (__x86_64__)
-
 #define COMMPAGE_DESCRIPTOR_FIELD_POINTER .quad
 #define COMMPAGE_DESCRIPTOR_REFERENCE(label) \
 	.quad COMMPAGE_DESCRIPTOR_NAME(label)
-
-#else
-#error unsupported architecture
-#endif
 
 #define COMMPAGE_FUNCTION_START(label,codetype,alignment) \
 .text								;\
@@ -157,6 +145,8 @@ extern	void	commpage_set_memory_pressure(unsigned int  pressure);
 extern	void	commpage_set_spin_count(unsigned int  count);
 extern	void	commpage_sched_gen_inc(void);
 extern	void	commpage_update_active_cpus(void);
+extern	void	commpage_update_mach_approximate_time(uint64_t abstime);
+extern	void	commpage_update_kdebug_enable(void);
 
 extern	uint32_t	commpage_is_in_pfz32(uint32_t);
 extern	uint32_t	commpage_is_in_pfz64(addr64_t);

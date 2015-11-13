@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -35,6 +35,9 @@
 #if CONFIG_MTRR
 #include <i386/mtrr.h>
 #endif
+#if HYPERVISOR
+#include <kern/hv_support.h>
+#endif
 #if CONFIG_VMX
 #include <i386/vmx/vmx_cpu.h>
 #endif
@@ -53,7 +56,6 @@
 #include <i386/tsc.h>
 
 #include <kern/cpu_data.h>
-#include <kern/etimer.h>
 #include <kern/machine.h>
 #include <kern/timer_queue.h>
 #include <console/serial_protos.h>
@@ -72,6 +74,7 @@ extern void	acpi_wake_prot(void);
 #endif
 extern kern_return_t IOCPURunPlatformQuiesceActions(void);
 extern kern_return_t IOCPURunPlatformActiveActions(void);
+extern kern_return_t IOCPURunPlatformHaltRestartActions(uint32_t message);
 
 extern void 	fpinit(void);
 
@@ -96,7 +99,7 @@ typedef struct acpi_hibernate_callback_data acpi_hibernate_callback_data_t;
 unsigned int		save_kdebug_enable = 0;
 static uint64_t		acpi_sleep_abstime;
 static uint64_t		acpi_idle_abstime;
-static uint64_t		acpi_wake_abstime;
+static uint64_t		acpi_wake_abstime, acpi_wake_postrebase_abstime;
 boolean_t		deep_idle_rebase = TRUE;
 
 #if CONFIG_SLEEP
@@ -110,21 +113,20 @@ acpi_hibernate(void *refcon)
 
 	if (current_cpu_datap()->cpu_hibernate) 
 	{
-#if defined(__i386__)
-		cpu_IA32e_enable(current_cpu_datap());
-#endif
 		mode = hibernate_write_image();
 
 		if( mode == kIOHibernatePostWriteHalt )
 		{
 			// off
 			HIBLOG("power off\n");
+			IOCPURunPlatformHaltRestartActions(kPEHaltCPU);
 			if (PE_halt_restart) (*PE_halt_restart)(kPEHaltCPU);
 		}
 		else if( mode == kIOHibernatePostWriteRestart )
 		{
 			// restart
 			HIBLOG("restart\n");
+			IOCPURunPlatformHaltRestartActions(kPERestartCPU);
 			if (PE_halt_restart) (*PE_halt_restart)(kPERestartCPU);
 		}
 		else
@@ -136,12 +138,6 @@ acpi_hibernate(void *refcon)
 			cpu_datap(0)->cpu_hibernate = 0;			
 		}
 
-#if defined(__i386__)
-		/*
-		 * If we're in 64-bit mode, drop back into legacy mode during sleep.
-		 */
-		cpu_IA32e_disable(current_cpu_datap());
-#endif
 	}
 	kdebug_enable = 0;
 
@@ -157,6 +153,7 @@ acpi_hibernate(void *refcon)
 #endif /* HIBERNATION */
 
 extern void			slave_pstart(void);
+extern void			hibernate_rebuild_vm_structs(void);
 
 extern	unsigned int		wake_nkdbufs;
 
@@ -170,9 +167,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	unsigned int	cpu;
 	kern_return_t	rc;
 	unsigned int	my_cpu;
-	uint64_t	now;
-	uint64_t	my_tsc;
-	uint64_t	my_abs;
+	uint64_t	start;
+	uint64_t	elapsed = 0;
+	uint64_t	elapsed_trace_start = 0;
 
 	kprintf("acpi_sleep_kernel hib=%d, cpu=%d\n",
 			current_cpu_datap()->cpu_hibernate, cpu_number());
@@ -199,6 +196,11 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* Save power management timer state */
 	pmTimerSave();
 
+#if HYPERVISOR
+	/* Notify hypervisor that we are about to sleep */
+	hv_suspend();
+#endif
+
 #if CONFIG_VMX
 	/* 
 	 * Turn off VT, otherwise switching to legacy mode will fail
@@ -206,12 +208,6 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	vmx_suspend();
 #endif
 
-#if defined(__i386__)
-	/*
-	 * If we're in 64-bit mode, drop back into legacy mode during sleep.
-	 */
-	cpu_IA32e_disable(current_cpu_datap());
-#endif
 	/*
 	 * Enable FPU/SIMD unit for potential hibernate acceleration
 	 */
@@ -230,18 +226,16 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	 * Will not return until platform is woken up,
 	 * or if sleep failed.
 	 */
-#ifdef __x86_64__
 	uint64_t old_cr3 = x86_64_pre_sleep();
-#endif
 #if HIBERNATION
 	acpi_sleep_cpu(acpi_hibernate, &data);
 #else
 	acpi_sleep_cpu(func, refcon);
 #endif
 
-#ifdef __x86_64__
+	start = mach_absolute_time();
+
 	x86_64_post_sleep(old_cr3);
-#endif
 
 #endif /* CONFIG_SLEEP */
 
@@ -255,11 +249,6 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 
 #if HIBERNATION
 	if (current_cpu_datap()->cpu_hibernate) {
-#if defined(__i386__)
-		int i;
-		for (i = 0; i < PMAP_NWINDOWS; i++)
-			*current_cpu_datap()->cpu_pmap->mapwindow[i].prv_CMAP = 0;
-#endif
 		did_hibernate = TRUE;
 
 	} else
@@ -302,23 +291,31 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	 */
 	pmMarkAllCPUsOff();
 
-	ml_get_timebase(&now);
 
 	/* re-enable and re-init local apic (prior to starting timers) */
 	if (lapic_probe())
 		lapic_configure();
 
+	hibernate_rebuild_vm_structs();
+
+	elapsed += mach_absolute_time() - start;
 	acpi_wake_abstime = mach_absolute_time();
 
 	/* let the realtime clock reset */
 	rtc_sleep_wakeup(acpi_sleep_abstime);
+	acpi_wake_postrebase_abstime = mach_absolute_time();
+	assert(mach_absolute_time() >= acpi_sleep_abstime);
 
 	kdebug_enable = save_kdebug_enable;
 
 	if (kdebug_enable == 0) {
-		if (wake_nkdbufs)
+		if (wake_nkdbufs) {
+			start = mach_absolute_time();
 			start_kern_tracing(wake_nkdbufs, TRUE);
+			elapsed_trace_start += mach_absolute_time() - start;
+		}
 	}
+	start = mach_absolute_time();
 
 	/* Reconfigure FP/SIMD unit */
 	init_fpu();
@@ -327,12 +324,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	IOCPURunPlatformActiveActions();
 
 	if (did_hibernate) {
+		elapsed += mach_absolute_time() - start;
 		
-		my_tsc = (now >> 32) | (now << 32);
-		my_abs = tmrCvt(my_tsc, tscFCvtt2n);
-
-		KERNEL_DEBUG_CONSTANT(IOKDBG_CODE(DBG_HIBERNATE, 2) | DBG_FUNC_START,
-				      (uint32_t)(my_abs >> 32), (uint32_t)my_abs, 0, 0, 0);
+		KERNEL_DEBUG_CONSTANT(IOKDBG_CODE(DBG_HIBERNATE, 2) | DBG_FUNC_START, elapsed, elapsed_trace_start, 0, 0, 0);
 		hibernate_machine_init();
 		KERNEL_DEBUG_CONSTANT(IOKDBG_CODE(DBG_HIBERNATE, 2) | DBG_FUNC_END, 0, 0, 0, 0, 0);
 
@@ -351,17 +345,7 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* Restart timer interrupts */
 	rtc_timer_start();
 
-
-
 #if HIBERNATION
-#ifdef __i386__
-	/* The image is written out using the copy engine, which disables
-	 * preemption. Since the copy engine writes out the page which contains
-	 * the preemption variable when it is disabled, we need to explicitly
-	 * enable it here */
-	if (did_hibernate)
-		enable_preemption();
-#endif
 
 	kprintf("ret from acpi_sleep_cpu hib=%d\n", did_hibernate);
 #endif
@@ -448,7 +432,8 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 		rtc_sleep_wakeup(acpi_idle_abstime);
 		kdebug_enable = save_kdebug_enable;
 	}
-
+	acpi_wake_postrebase_abstime = mach_absolute_time();
+	assert(mach_absolute_time() >= acpi_idle_abstime);
 	cpu_datap(master_cpu)->cpu_running = TRUE;
 
 	KERNEL_DEBUG_CONSTANT(
@@ -496,3 +481,9 @@ install_real_mode_bootstrap(void *prot_entry)
 	__asm__("wbinvd");
 }
 
+boolean_t
+ml_recent_wake(void) {
+	uint64_t ctime = mach_absolute_time();
+	assert(ctime > acpi_wake_postrebase_abstime);
+	return ((ctime - acpi_wake_postrebase_abstime) < 5 * NSEC_PER_SEC);
+}

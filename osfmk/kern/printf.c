@@ -156,10 +156,8 @@
 
 #include <debug.h>
 #include <mach_kdp.h>
-#include <platforms.h>
 #include <mach/boolean.h>
 #include <kern/cpu_number.h>
-#include <kern/lock.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <kern/misc_protos.h>
@@ -647,8 +645,6 @@ dummy_putc(int ch, void *arg)
     real_putc(ch);
 }
 
-int enable_timing = 1;
-
 void 
 _doprnt(
 	register const char	*fmt,
@@ -657,18 +653,6 @@ _doprnt(
 	void			(*putc)(char),
 	int			radix)		/* default radix - for '%r' */
 {
-#if 0
-	/* timing information */
-	if(enable_timing) {
-		char tbuf[50], *tp;
-		uint64_t t = mach_absolute_time();
-		uint64_t ns; absolutetime_to_nanoseconds(t, &ns);
-		/* truncate the end of the timing information */
-		int tlen = sprintf(tbuf, "[%5llu.%06llu] ", (uint64_t)(ns / NSEC_PER_SEC), (uint64_t)((ns % NSEC_PER_SEC) / 1000));
-		for(tp = tbuf; tp < tbuf + tlen; tp++) 
-			putc(*tp);
-	}
-#endif
     __doprnt(fmt, *argp, dummy_putc, putc, radix);
 }
 
@@ -857,13 +841,7 @@ kdb_printf_unbuffered(const char *fmt, ...)
 	va_end(listp);
 	return 0;
 }
- 
-#ifdef __arm__  /* I don't want to rebuild my symbolsets. */
-#undef CONFIG_EMBEDDED
-#define CONFIG_EMBEDDED 0
-#endif
 
-#if !CONFIG_EMBEDDED
 
 static void
 copybyte(int c, void *arg)
@@ -896,4 +874,3 @@ sprintf(char *buf, const char *fmt, ...)
 	*copybyte_str = '\0';
         return (int)strlen(buf);
 }
-#endif /* !CONFIG_EMBEDDED */

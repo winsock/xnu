@@ -56,7 +56,7 @@ mac_labelzone_alloc(int flags)
 {
 	struct label *l;
 
-	if (flags & MAC_NOWAIT)
+	if (flags & MAC_NOWAIT) 
 		l = (struct label *) zalloc_noblock(zone_label);
 	else
 		l = (struct label *) zalloc(zone_label);
@@ -65,20 +65,15 @@ mac_labelzone_alloc(int flags)
 
 	bzero(l, sizeof(struct label));
 	l->l_flags = MAC_FLAG_INITIALIZED;
-
 	return (l);
 }
 
 void
 mac_labelzone_free(struct label *l)
 {
+
 	if (l == NULL)
-#if defined(__arm__)
-		kprintf("mac_labelzone_free(): attempting to free NULL mac label for thread %p!\n", current_thread());
-		return;
-#else
 		panic("Free of NULL MAC label\n");
-#endif
 
 	if ((l->l_flags & MAC_FLAG_INITIALIZED) == 0)
 		panic("Free of uninitialized label\n");

@@ -42,11 +42,12 @@ struct exec_info {
 };
 
 int grade_binary(cpu_type_t, cpu_subtype_t);
+boolean_t pie_required(cpu_type_t, cpu_subtype_t);
 
 #if defined (__i386__) || defined(__x86_64__)
 #include "i386/exec.h"
 #else
-#include "arm/exec.h"
+#error architecture not supported
 #endif
 
 #endif /* _BSD_MACHINE_EXEC_H_ */

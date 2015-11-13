@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -59,17 +59,18 @@
 
 #include <kern/cpu_number.h>
 #include <kern/kalloc.h>
-#include <kern/lock.h>
 #include <kern/spl.h>
 #include <kern/thread.h>
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
 #include <kern/misc_protos.h>
 #include <kern/clock.h>
+#include <kern/telemetry.h>
+#include <kern/ecc.h>
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
 #include <stdarg.h>
-#if !MACH_KDP
+#if !(MACH_KDP && CONFIG_KDP_INTERACTIVE_DEBUGGING)
 #include <kdp/kdp_udp.h>
 #endif
 
@@ -87,6 +88,10 @@
 #include <libkern/kernel_mach_header.h>
 #include <uuid/uuid.h>
 
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+#include <pexpert/pexpert.h> /* For gPanicBase */
+#endif
+
 unsigned int	halt_in_debugger = 0;
 unsigned int	switch_debugger = 0;
 unsigned int	current_debugger = 0;
@@ -96,6 +101,7 @@ unsigned int 	disable_debug_output = TRUE;
 unsigned int 	systemLogDiags = FALSE;
 unsigned int 	panicDebugging = FALSE;
 unsigned int	logPanicDataToScreen = FALSE;
+unsigned int	kdebug_serial = FALSE;
 
 int mach_assert = 1;
 
@@ -108,18 +114,23 @@ unsigned int		panic_is_inited = 0;
 unsigned int		return_on_panic = 0;
 unsigned long		panic_caller;
 
-#if CONFIG_EMBEDDED
-#define DEBUG_BUF_SIZE (PAGE_SIZE)
-#else
 #define DEBUG_BUF_SIZE (3 * PAGE_SIZE)
-#endif
 
+/* debug_buf is directly linked with iBoot panic region for ARM64 targets */
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+char *debug_buf_addr = NULL;
+char *debug_buf_ptr = NULL;
+unsigned int debug_buf_size = 0;
+#else
 char debug_buf[DEBUG_BUF_SIZE];
+__used char *debug_buf_addr = debug_buf;
 char *debug_buf_ptr = debug_buf;
 unsigned int debug_buf_size = sizeof(debug_buf);
+#endif
 
 static char model_name[64];
-/* uuid_string_t */ char kernel_uuid[37]; 
+unsigned char *kernel_uuid;
+/* uuid_string_t */ char kernel_uuid_string[37];
 
 static spl_t panic_prologue(const char *str);
 static void panic_epilogue(spl_t s);
@@ -142,7 +153,7 @@ typedef struct pasc pasc_t;
 #undef Assert
 #endif
 
-void
+void __attribute__((noinline))
 Assert(
 	const char	*file,
 	int		line,
@@ -156,7 +167,15 @@ Assert(
 	}
 
 	saved_return_on_panic = return_on_panic;
-	return_on_panic = 1;
+
+	/*
+	 * If we don't have a debugger configured, returning from an
+	 * assert is a bad, bad idea; there is no guarantee that we
+	 * didn't simply assert before we were able to restart the
+	 * platform.
+	 */
+	if (current_debugger != NO_CUR_DB)
+		return_on_panic = 1;
 
 	panic_plain("%s:%d Assertion failed: %s", file, line, expression);
 
@@ -181,7 +200,6 @@ MACRO_BEGIN								\
 		simple_unlock(&panic_lock);				\
 MACRO_END
 
-
 void
 panic_init(void)
 {
@@ -190,7 +208,8 @@ panic_init(void)
 
 	uuid = getuuidfromheader(&_mh_execute_header, &uuidlen);
 	if ((uuid != NULL) && (uuidlen == sizeof(uuid_t))) {
-		uuid_unparse_upper(*(uuid_t *)uuid, kernel_uuid);
+		kernel_uuid = uuid;
+		uuid_unparse_upper(*(uuid_t *)uuid, kernel_uuid_string);
 	}
 
 	simple_lock_init(&panic_lock, 0);
@@ -203,8 +222,20 @@ debug_log_init(void)
 {
 	if (debug_buf_size != 0)
 		return;
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+	if (!gPanicBase) {
+		printf("debug_log_init: Error!! gPanicBase is still not initialized\n");
+		return;
+	}
+	/* Shift debug buf start location and size by 8 bytes for magic header and crc value */
+	debug_buf_addr = (char*)gPanicBase + 8;
+	debug_buf_ptr = debug_buf_addr;
+	debug_buf_size = gPanicSize - 8;
+#else
+	debug_buf_addr = debug_buf;
 	debug_buf_ptr = debug_buf;
 	debug_buf_size = sizeof(debug_buf);
+#endif
 }
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -212,7 +243,7 @@ debug_log_init(void)
 #define panic_safe()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE)
 #define panic_normal()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_NORMAL)
 #else
-#define panic_stop()	Halt_system()
+#define panic_stop()	{ while (1) ; }
 #define panic_safe()
 #define panic_normal()
 #endif
@@ -228,14 +259,18 @@ void _consume_panic_args(int a __unused, ...)
     panic("panic");
 }
 
+extern unsigned int write_trace_on_panic;
+
 static spl_t
 panic_prologue(const char *str)
 {
 	spl_t	s;
 
-	if (kdebug_enable) {
-		ml_set_interrupts_enabled(TRUE);
-		kdbg_dump_trace_to_file("/var/tmp/panic.trace");
+	if (write_trace_on_panic && kdebug_enable) {
+		if (get_preemption_level() == 0 && !ml_at_interrupt_context()) {
+			ml_set_interrupts_enabled(TRUE);
+			kdbg_dump_trace_to_file("/var/tmp/panic.trace");
+		}
 	}
 
 	s = splhigh();
@@ -253,10 +288,9 @@ panic_prologue(const char *str)
 
 	panic_safe();
 
-#ifndef __arm__ 	/* xxx show all panic output for now. */
 	if( logPanicDataToScreen )
-#endif		
 		disable_debug_output = FALSE;
+		
 	debug_mode = TRUE;
 
 restart:
@@ -311,16 +345,12 @@ panic_epilogue(spl_t	s)
 	/* NOTREACHED */
 }
 
-extern int enable_timing;
-
 void
 panic(const char *str, ...)
 {
 	va_list	listp;
 	spl_t	s;
 
-	if(enable_timing)
-		enable_timing = 0;
 
 	/* panic_caller is initialized to 0.  If set, don't change it */
 	if ( ! panic_caller )
@@ -338,8 +368,6 @@ panic(const char *str, ...)
 	/*
 	 * Release panicwait indicator so that other cpus may call Debugger().
 	 */
-	enable_timing = 1;
-
 	panicwait = 0;
 	Debugger("panic");
 	panic_epilogue(s);
@@ -350,6 +378,7 @@ panic_context(unsigned int reason, void *ctx, const char *str, ...)
 {
 	va_list	listp;
 	spl_t	s;
+
 
 	/* panic_caller is initialized to 0.  If set, don't change it */
 	if ( ! panic_caller )
@@ -393,7 +422,7 @@ void
 debug_putc(char c)
 {
 	if ((debug_buf_size != 0) &&
-		((debug_buf_ptr-debug_buf) < (int)debug_buf_size)) {
+		((debug_buf_ptr-debug_buf_addr) < (int)debug_buf_size)) {
 		*debug_buf_ptr=c;
 		debug_buf_ptr++;
 	}
@@ -469,8 +498,7 @@ void populate_model_name(char *model_string) {
 	strlcpy(model_name, model_string, sizeof(model_name));
 }
 
-static void panic_display_model_name(void) {
-#ifndef __arm__
+void panic_display_model_name(void) {
 	char tmp_model_name[sizeof(model_name)];
 
 	if (ml_nofault_copy((vm_offset_t) &model_name, (vm_offset_t) &tmp_model_name, sizeof(model_name)) != sizeof(model_name))
@@ -480,31 +508,28 @@ static void panic_display_model_name(void) {
 
 	if (tmp_model_name[0] != 0)
 		kdb_printf("System model name: %s\n", tmp_model_name);
-#else
-	kdb_printf("System model name: %s\n", model_name);
-#endif
 }
 
-static void panic_display_kernel_uuid(void) {
-#ifndef __arm__
-	char tmp_kernel_uuid[sizeof(kernel_uuid)];
+void panic_display_kernel_uuid(void) {
+	char tmp_kernel_uuid[sizeof(kernel_uuid_string)];
 
-	if (ml_nofault_copy((vm_offset_t) &kernel_uuid, (vm_offset_t) &tmp_kernel_uuid, sizeof(kernel_uuid)) != sizeof(kernel_uuid))
+	if (ml_nofault_copy((vm_offset_t) &kernel_uuid_string, (vm_offset_t) &tmp_kernel_uuid, sizeof(kernel_uuid_string)) != sizeof(kernel_uuid_string))
 		return;
 
 	if (tmp_kernel_uuid[0] != '\0')
 		kdb_printf("Kernel UUID: %s\n", tmp_kernel_uuid);
-#else
-	kdb_printf("Kernel UUID: %s\n", kernel_uuid);
-#endif
 }
 
-static void panic_display_kernel_aslr(void) {
-#if	defined(__x86_64__) || (__arm__)
+void panic_display_kernel_aslr(void) {
 	if (vm_kernel_slide) {
-		kdb_printf("Kernel slide:     0x%016lx\n", vm_kernel_slide);
+		kdb_printf("Kernel slide:     0x%016lx\n", (unsigned long) vm_kernel_slide);
 		kdb_printf("Kernel text base: %p\n", (void *) vm_kernel_stext);
 	}
+}
+
+void panic_display_hibb(void) {
+#if defined(__i386__) || defined (__x86_64__)
+	kdb_printf("__HIB  text base: %p\n", (void *) vm_hib_base);
 #endif
 }
 
@@ -520,16 +545,8 @@ extern char osversion[];
 
 static volatile uint32_t config_displayed = 0;
 
-#ifdef __arm__
-#define	panic_display_pal_info() do { } while(0)
-#endif
-
-#ifdef __arm__
-extern char firmware_version[32];
-extern uint32_t debug_enabled;
-#endif
-
 __private_extern__ void panic_display_system_configuration(void) {
+
 	panic_display_process_name();
 	if (OSCompareAndSwap(0, 1, &config_displayed)) {
 		char buf[256];
@@ -540,6 +557,7 @@ __private_extern__ void panic_display_system_configuration(void) {
 		kdb_printf("\nKernel version:\n%s\n",version);
 		panic_display_kernel_uuid();
 		panic_display_kernel_aslr();
+		panic_display_hibb();
 		panic_display_pal_info();
 		panic_display_model_name();
 		panic_display_uptime();
@@ -597,9 +615,22 @@ __private_extern__ void panic_display_zprint()
 	}
 }
 
+#if CONFIG_ECC_LOGGING
+__private_extern__ void panic_display_ecc_errors() 
+{
+	uint32_t count = ecc_log_get_correction_count();
+
+	if (count > 0) {
+		kdb_printf("ECC Corrections:%u\n", count);
+	}
+}
+#endif /* CONFIG_ECC_LOGGING */
+
 #if CONFIG_ZLEAKS
 extern boolean_t	panic_include_ztrace;
 extern struct ztrace* top_ztrace;
+void panic_print_symbol_name(vm_address_t search);
+
 /*
  * Prints the backtrace most suspected of being a leaker, if we paniced in the zone allocator.
  * top_ztrace and panic_include_ztrace comes from osfmk/kern/zalloc.c
@@ -608,6 +639,9 @@ __private_extern__ void panic_display_ztrace(void)
 {
 	if(panic_include_ztrace == TRUE) {
 		unsigned int i = 0;
+ 		boolean_t keepsyms = FALSE;
+
+		PE_parse_boot_argn("keepsyms", &keepsyms, sizeof (keepsyms));
 		struct ztrace top_ztrace_copy;
 		
 		/* Make sure not to trip another panic if there's something wrong with memory */
@@ -615,7 +649,11 @@ __private_extern__ void panic_display_ztrace(void)
 			kdb_printf("\nBacktrace suspected of leaking: (outstanding bytes: %lu)\n", (uintptr_t)top_ztrace_copy.zt_size);
 			/* Print the backtrace addresses */
 			for (i = 0; (i < top_ztrace_copy.zt_depth && i < MAX_ZTRACE_DEPTH) ; i++) {
-				kdb_printf("%p\n", top_ztrace_copy.zt_stack[i]);
+				kdb_printf("%p ", top_ztrace_copy.zt_stack[i]);
+				if (keepsyms) {
+					panic_print_symbol_name((vm_address_t)top_ztrace_copy.zt_stack[i]);
+				}
+				kdb_printf("\n");
 			}
 			/* Print any kexts in that backtrace, along with their link addresses so we can properly blame them */
 			kmod_panic_dump((vm_offset_t *)&top_ztrace_copy.zt_stack[0], top_ztrace_copy.zt_depth);
@@ -628,12 +666,12 @@ __private_extern__ void panic_display_ztrace(void)
 }
 #endif /* CONFIG_ZLEAKS */
 
-#if !MACH_KDP
-static struct ether_addr kdp_current_mac_address = {{0, 0, 0, 0, 0, 0}};
+#if ! (MACH_KDP && CONFIG_KDP_INTERACTIVE_DEBUGGING)
+static struct kdp_ether_addr kdp_current_mac_address = {{0, 0, 0, 0, 0, 0}};
 
 /* XXX ugly forward declares to stop warnings */
 void *kdp_get_interface(void);
-void kdp_set_ip_and_mac_addresses(struct in_addr *, struct ether_addr *);
+void kdp_set_ip_and_mac_addresses(struct kdp_in_addr *, struct kdp_ether_addr *);
 void kdp_set_gateway_mac(void *);
 void kdp_set_interface(void *);
 void kdp_register_send_receive(void *, void *);
@@ -652,7 +690,7 @@ unsigned int
 kdp_get_ip_address(void )
 { return 0; }
 
-struct ether_addr
+struct kdp_ether_addr
 kdp_get_mac_addr(void)
 {       
         return kdp_current_mac_address;
@@ -660,8 +698,8 @@ kdp_get_mac_addr(void)
 
 void
 kdp_set_ip_and_mac_addresses(   
-        __unused struct in_addr          *ipaddr,
-        __unused struct ether_addr       *macaddr)
+        __unused struct kdp_in_addr          *ipaddr,
+        __unused struct kdp_ether_addr       *macaddr)
 {}
 
 void
@@ -680,21 +718,17 @@ void
 kdp_unregister_send_receive(__unused void *send, __unused void *receive)
 {}
 
-void
-kdp_snapshot_preflight(__unused int pid, __unused void * tracebuf,
-		__unused uint32_t tracebuf_size, __unused uint32_t options)
+void kdp_register_link(__unused kdp_link_t link, __unused kdp_mode_t mode)
 {}
 
-int
-kdp_stack_snapshot_geterror(void)
-{       
-        return -1;
-}
+void kdp_unregister_link(__unused kdp_link_t link, __unused kdp_mode_t mode)
+{}
 
-int
-kdp_stack_snapshot_bytes_traced(void)
-{       
-        return 0;
-}
+#endif
 
+#if !CONFIG_TELEMETRY
+int telemetry_gather(user_addr_t buffer __unused, uint32_t *length __unused, boolean_t mark __unused)
+{
+	return KERN_NOT_SUPPORTED;
+}
 #endif

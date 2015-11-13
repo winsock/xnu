@@ -33,7 +33,7 @@
 #if defined (__i386__) || defined (__x86_64__)
 #include "i386/simple_lock.h"
 #else
-//#error architecture not supported
+#error architecture not supported
 #endif
 
 #endif /* _MACHINE_SIMPLE_LOCK_H_ */

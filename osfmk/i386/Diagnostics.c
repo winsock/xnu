@@ -71,7 +71,6 @@
 #include <mach/i386/syscall_sw.h>
 #include <kern/kalloc.h>
 #include <sys/kdebug.h>
-
 #include <i386/machine_cpu.h>
 #include <i386/misc_protos.h>
 #include <i386/cpuid.h>
@@ -80,7 +79,7 @@
 
 diagWork        dgWork;
 uint64_t        lastRuptClear = 0ULL;
-
+boolean_t	diag_pmc_enabled = FALSE;
 void cpu_powerstats(void *);
 
 typedef struct {
@@ -95,9 +94,13 @@ typedef struct {
 	uint64_t cpu_insns;
 	uint64_t cpu_ucc;
 	uint64_t cpu_urc;
+#if	DIAG_ALL_PMCS
+	uint64_t gpmcs[4];
+#endif /* DIAG_ALL_PMCS */
 } core_energy_stat_t;
 
 typedef struct {
+	uint64_t pkes_version;
 	uint64_t pkg_cres[2][7];
 	uint64_t pkg_power_unit;
 	uint64_t pkg_energy;
@@ -130,6 +133,7 @@ diagCall64(x86_saved_state_t * state)
 
 	assert(is_saved_state64(state));
 	regs = saved_state64(state);
+
 	diagflag = ((dgWork.dgFlags & enaDiagSCs) != 0);
 	selector = regs->rdi;
 
@@ -154,7 +158,6 @@ diagCall64(x86_saved_state_t * state)
 
 		(void) copyout((char *) &real_ncpus, data, sizeof(real_ncpus));	/* Copy out number of
 										 * processors */
-
 		currNap = mach_absolute_time();	/* Get the time now */
 		durNap = currNap - lastRuptClear;	/* Get the last interval
 							 * duration */
@@ -176,6 +179,7 @@ diagCall64(x86_saved_state_t * state)
 		}
 		rval = 1;
 		break;
+
 	case dgPowerStat:
 	{
 		uint32_t c2l = 0, c2h = 0, c3l = 0, c3h = 0, c6l = 0, c6h = 0, c7l = 0, c7h = 0;
@@ -187,6 +191,7 @@ diagCall64(x86_saved_state_t * state)
 		bzero(&pkes, sizeof(pkes));
 		bzero(&cest, sizeof(cest));
 
+		pkes.pkes_version = 1ULL;
 		rdmsr_carefully(MSR_IA32_PKG_C2_RESIDENCY, &c2l, &c2h);
 		rdmsr_carefully(MSR_IA32_PKG_C3_RESIDENCY, &c3l, &c3h);
 		rdmsr_carefully(MSR_IA32_PKG_C6_RESIDENCY, &c6l, &c6h);
@@ -197,23 +202,11 @@ diagCall64(x86_saved_state_t * state)
 		pkes.pkg_cres[0][2] = ((uint64_t)c6h << 32) | c6l;
 		pkes.pkg_cres[0][3] = ((uint64_t)c7h << 32) | c7l;
 
-		uint32_t cpumodel = cpuid_info()->cpuid_model;
-		boolean_t c8avail;
-		switch (cpumodel) {
-		case CPUID_MODEL_HASWELL_ULT:
-			c8avail = TRUE;
-			break;
-		default:
-			c8avail = FALSE;
-			break;
-		}
 		uint64_t c8r = ~0ULL, c9r = ~0ULL, c10r = ~0ULL;
 
-		if (c8avail) {
-			rdmsr64_carefully(MSR_IA32_PKG_C8_RESIDENCY, &c8r);
-			rdmsr64_carefully(MSR_IA32_PKG_C9_RESIDENCY, &c9r);
-			rdmsr64_carefully(MSR_IA32_PKG_C10_RESIDENCY, &c10r);
-		}
+		rdmsr64_carefully(MSR_IA32_PKG_C8_RESIDENCY, &c8r);
+		rdmsr64_carefully(MSR_IA32_PKG_C9_RESIDENCY, &c9r);
+		rdmsr64_carefully(MSR_IA32_PKG_C10_RESIDENCY, &c10r);
 
 		pkes.pkg_cres[0][4] = c8r;
 		pkes.pkg_cres[0][5] = c9r;
@@ -272,6 +265,9 @@ diagCall64(x86_saved_state_t * state)
  			cest.cpu_insns = cpu_data_ptr[i]->cpu_cur_insns;
  			cest.cpu_ucc = cpu_data_ptr[i]->cpu_cur_ucc;
  			cest.cpu_urc = cpu_data_ptr[i]->cpu_cur_urc;
+#if DIAG_ALL_PMCS
+			bcopy(&cpu_data_ptr[i]->cpu_gpmcs[0], &cest.gpmcs[0], sizeof(cest.gpmcs));
+#endif /* DIAG_ALL_PMCS */			
  			(void) ml_set_interrupts_enabled(TRUE);
 
 			copyout(&cest, curpos, sizeof(cest));
@@ -283,21 +279,27 @@ diagCall64(x86_saved_state_t * state)
  	case dgEnaPMC:
  	{
  		boolean_t enable = TRUE;
- 		mp_cpus_call(CPUMASK_ALL, ASYNC, cpu_pmc_control, &enable);
+		uint32_t cpuinfo[4];
+		/* Require architectural PMC v2 or higher, corresponding to
+		 * Merom+, or equivalent virtualised facility.
+		 */
+		do_cpuid(0xA, &cpuinfo[0]);
+		if ((cpuinfo[0] & 0xFF) >= 2) {
+			mp_cpus_call(CPUMASK_ALL, ASYNC, cpu_pmc_control, &enable);
+			diag_pmc_enabled = TRUE;
+		}
  		rval = 1;
  	}
  	break;
-
 #if	DEBUG
 	case dgGzallocTest:
 	{
 		(void) ml_set_interrupts_enabled(TRUE);
-		if (diagflag == 0)
-			break;
-
-		unsigned *ptr = (unsigned *)kalloc(1024);
-		kfree(ptr, 1024);
-		*ptr = 0x42;
+		if (diagflag) {
+			unsigned *ptr = (unsigned *)kalloc(1024);
+			kfree(ptr, 1024);
+			*ptr = 0x42;
+		}
 	}
 	break;
 #endif
@@ -306,21 +308,18 @@ diagCall64(x86_saved_state_t * state)
 	case	dgPermCheck:
 	{
 		(void) ml_set_interrupts_enabled(TRUE);
-		if (diagflag == 0)
-			break;
-
-		rval = pmap_permissions_verify(kernel_pmap, kernel_map, 0, ~0ULL);
+		if (diagflag)
+			rval = pmap_permissions_verify(kernel_pmap, kernel_map, 0, ~0ULL);
 	}
  		break;
 #endif /* PERMIT_PERMCHECK */
-
 	default:		/* Handle invalid ones */
 		rval = 0;	/* Return an exception */
 	}
 
 	regs->rax = rval;
 
-	return rval;		/* Normal non-ast check return */
+	return rval;
 }
 
 void cpu_powerstats(__unused void *arg) {
@@ -346,13 +345,22 @@ void cpu_powerstats(__unused void *arg) {
 
 	rdmsr_carefully(MSR_IA32_CORE_C7_RESIDENCY, &cl, &ch);
 	cdp->cpu_c7res = ((uint64_t)ch << 32) | cl;
-	
-	uint64_t insns = read_pmc(FIXED_PMC0);
-	uint64_t ucc = read_pmc(FIXED_PMC1);
-	uint64_t urc = read_pmc(FIXED_PMC2);
-	cdp->cpu_cur_insns = insns;
-	cdp->cpu_cur_ucc = ucc;
-	cdp->cpu_cur_urc = urc;
+
+	if (diag_pmc_enabled) {
+		uint64_t insns = read_pmc(FIXED_PMC0);
+		uint64_t ucc = read_pmc(FIXED_PMC1);
+		uint64_t urc = read_pmc(FIXED_PMC2);
+#if DIAG_ALL_PMCS
+		int i;
+
+		for (i = 0; i < 4; i++) {
+			cdp->cpu_gpmcs[i] = read_pmc(i);
+		}
+#endif /* DIAG_ALL_PMCS */
+		cdp->cpu_cur_insns = insns;
+		cdp->cpu_cur_ucc = ucc;
+		cdp->cpu_cur_urc = urc;
+	}
 }
 
 void cpu_pmc_control(void *enablep) {

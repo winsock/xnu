@@ -30,8 +30,6 @@
 
 #if defined (__i386__) || defined (__x86_64__)
 #include "i386/cpu_data.h"
-#elif defined(__arm__)
-#include "arm/cpu_data.h"
 #else
 #error architecture not supported
 #endif

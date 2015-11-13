@@ -39,7 +39,7 @@ LEAF(___syscall, 0)
 	movl	(%esp),%edx	// add one element to stack so
 	pushl	%ecx		// caller "pop" will work
 	jnb	2f
-	BRANCH_EXTERN(cerror)
+	BRANCH_EXTERN(tramp_cerror)
 2:
 END(___syscall)
 
@@ -49,10 +49,6 @@ END(___syscall)
 // The number of arguments here is variable, but our macros ignore
 // that value anyway.
 __SYSCALL(___syscall, syscall, 0);
-
-#elif defined(__arm__)
-
-__SYSCALL(__syscall, syscall, 7)
 
 #else
 #error Unsupported architecture

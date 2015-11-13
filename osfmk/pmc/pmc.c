@@ -1038,8 +1038,6 @@ static void pmc_internal_reservation_broadcast(pmc_reservation_t reservation, vo
 				mask = CPUMASK_ALL;
 			}
 			mp_cpus_call(mask, ASYNC, action_func, reservation);
-#elif defined(__arm__)
-    panic("Please implement me: pmc_internal_reservation_broadcast");
 #else
 #error pmc_reservation_interrupt needs an inter-processor method invocation mechanism for this architecture
 #endif

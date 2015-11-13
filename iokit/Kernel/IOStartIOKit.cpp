@@ -42,16 +42,20 @@
 #include <IOKit/pwr_mgt/IOPMinformeeList.h>
 #include <IOKit/IOStatisticsPrivate.h>
 #include <IOKit/IOKitKeysPrivate.h>
+#include <IOKit/IOInterruptAccountingPrivate.h>
 
 #include <IOKit/assert.h>
 
 #include "IOKitKernelInternal.h"
 
+const OSSymbol * gIOProgressBackbufferKey;
+OSSet *          gIORemoveOnReadProperties;
+
 extern "C" {
 
 extern void OSlibkernInit (void);
 
-void iokit_post_constructor_init(void) __attribute__((section("__TEXT, initcode")));
+void iokit_post_constructor_init(void);
 
 #include <kern/clock.h>
 #include <sys/time.h>
@@ -60,12 +64,13 @@ void IOKitInitializeTime( void )
 {
 	mach_timespec_t		t;
 
-	t.tv_sec = 2;
+	t.tv_sec = 30;
 	t.tv_nsec = 0;
-
-	IOService::waitForService(IOService::resourceMatching("IORTC"), &t );
+	IOService::waitForService(
+		IOService::resourceMatching("IORTC"), &t );
 #if defined(__i386__) || defined(__x86_64__)
-	IOService::waitForService(IOService::resourceMatching("IONVRAM"), &t );
+	IOService::waitForService(
+		IOService::resourceMatching("IONVRAM"), &t );
 #endif
 
     clock_initialize_calendar();
@@ -135,7 +140,6 @@ void StartIOKit( void * p1, void * p2, void * p3, void * p4 )
     if( PE_parse_boot_argn( "iotrace", &debugFlags, sizeof (debugFlags) ))
 		gIOKitTrace = debugFlags;
 	
-
 	// Compat for boot-args
 	gIOKitTrace |= (gIOKitDebug & kIOTraceCompatBootArgs);
 	
@@ -152,6 +156,11 @@ void StartIOKit( void * p1, void * p2, void * p3, void * p4 )
     //
     IOLibInit(); 
     OSlibkernInit();
+
+    gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
+    gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
+
+    interruptAccountingInit();
 
     rootNub = new IOPlatformExpertDevice;
 
@@ -192,6 +201,19 @@ IORegistrySetOSBuildVersion(char * build_version)
     }
 
     return;
+}
+
+void
+IORecordProgressBackbuffer(void * buffer, size_t size, uint32_t theme)
+{
+    IORegistryEntry * chosen;
+    if ((chosen = IORegistryEntry::fromPath(kIODeviceTreePlane ":/chosen")))
+    {
+        chosen->setProperty(kIOProgressBackbufferKey, buffer, size);
+	chosen->setProperty(kIOProgressColorThemeKey, theme, 32);
+
+        chosen->release();
+    }
 }
 
 }; /* extern "C" */

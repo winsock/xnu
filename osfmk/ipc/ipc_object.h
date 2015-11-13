@@ -76,13 +76,12 @@
 
 #include <mach/kern_return.h>
 #include <mach/message.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 #include <kern/macro_help.h>
+#include <kern/assert.h>
 #include <kern/zalloc.h>
 #include <ipc/ipc_types.h>
 #include <libkern/OSAtomic.h>
-
-#include <kern/assert.h>
 
 typedef natural_t ipc_object_refs_t;	/* for ipc/ipc_object.h		*/
 typedef natural_t ipc_object_bits_t;
@@ -138,7 +137,7 @@ struct ipc_object_header {
 #define IO_BITS_OTYPE		0x7fff0000	/* determines a zone */
 #define	IO_BITS_ACTIVE		0x80000000	/* is object alive? */
 
-#define	io_active(io)		((io)->io_bits & IO_BITS_ACTIVE)
+#define	io_active(io)		(((io)->io_bits & IO_BITS_ACTIVE) != 0)
 
 #define	io_otype(io)		(((io)->io_bits & IO_BITS_OTYPE) >> 16)
 #define	io_kotype(io)		((io)->io_bits & IO_BITS_KOTYPE)

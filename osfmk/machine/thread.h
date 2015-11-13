@@ -30,8 +30,6 @@
 
 #if defined (__i386__) || defined (__x86_64__)
 #include "i386/thread.h"
-#elif defined(__arm__)
-#include "arm/thread.h"
 #else
 #error architecture not supported
 #endif

@@ -1,5 +1,9 @@
 /*
+<<<<<<< HEAD
  * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+=======
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+>>>>>>> master-tracking
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -67,8 +71,13 @@ struct btobj {
 struct update_state {
 	struct cat_desc *	s_desc;	
 	struct cat_attr *	s_attr;
+<<<<<<< HEAD
 	struct cat_fork *	s_datafork;
 	struct cat_fork *	s_rsrcfork;
+=======
+	const struct cat_fork *	s_datafork;
+	const struct cat_fork *	s_rsrcfork;
+>>>>>>> master-tracking
 	struct hfsmount *	s_hfsmp;
 };
 
@@ -92,6 +101,10 @@ u_char modetodirtype[16] = {
 
 #define HFS_LOOKUP_SYSFILE	0x1	/* If set, allow lookup of system files */
 #define HFS_LOOKUP_HARDLINK	0x2	/* If set, allow lookup of hard link records and not resolve the hard links */
+<<<<<<< HEAD
+=======
+#define HFS_LOOKUP_CASESENSITIVE	0x4	/* If set, verify results of a file/directory record match input case */
+>>>>>>> master-tracking
 static int cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t hint, int wantrsrc,
                   struct cat_desc *descp, struct cat_attr *attrp, struct cat_fork *forkp, cnid_t *desc_cnid);
 
@@ -121,9 +134,17 @@ static int builddesc(const HFSPlusCatalogKey *key, cnid_t cnid, u_int32_t hint, 
 
 static void getbsdattr(struct hfsmount *hfsmp, const struct HFSPlusCatalogFile *crp, struct cat_attr * attrp);
 
+<<<<<<< HEAD
 static void promotekey(struct hfsmount *hfsmp, const HFSCatalogKey *hfskey, HFSPlusCatalogKey *keyp, u_int32_t *encoding);
 static void promotefork(struct hfsmount *hfsmp, const struct HFSCatalogFile *file, int resource, struct cat_fork * forkp);
 static void promoteattr(struct hfsmount *hfsmp, const CatalogRecord *dataPtr, struct HFSPlusCatalogFile *crp);
+=======
+#if CONFIG_HFS_STD
+static void promotekey(struct hfsmount *hfsmp, const HFSCatalogKey *hfskey, HFSPlusCatalogKey *keyp, u_int32_t *encoding);
+static void promotefork(struct hfsmount *hfsmp, const struct HFSCatalogFile *file, int resource, struct cat_fork * forkp);
+static void promoteattr(struct hfsmount *hfsmp, const CatalogRecord *dataPtr, struct HFSPlusCatalogFile *crp);
+#endif
+>>>>>>> master-tracking
 
 static cnid_t getcnid(const CatalogRecord *crp);
 static u_int32_t getencoding(const CatalogRecord *crp);
@@ -136,7 +157,204 @@ static int buildthread(void *keyp, void *recp, int std_hfs, int directory);
 static int cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalogFile *crp);
 
 static int cat_update_internal(struct hfsmount *hfsmp, int update_hardlink, struct cat_desc *descp, struct cat_attr *attrp,
+<<<<<<< HEAD
 	struct cat_fork *dataforkp, struct cat_fork *rsrcforkp);
+=======
+	const struct cat_fork *dataforkp, const struct cat_fork *rsrcforkp);
+
+
+
+/* HFS ID Hashtable Functions */
+#define IDHASH(hfsmp, inum) (&hfsmp->hfs_idhashtbl[(inum) & hfsmp->hfs_idhash])
+
+/* Initialize the HFS ID hash table */
+void
+hfs_idhash_init (struct hfsmount *hfsmp) {
+	/* secured by catalog lock so no lock init needed */
+	hfsmp->hfs_idhashtbl = hashinit(HFS_IDHASH_DEFAULT, M_HFSMNT, &hfsmp->hfs_idhash);	
+}
+
+/* Free the HFS ID hash table */
+void
+hfs_idhash_destroy (struct hfsmount *hfsmp) {
+	/* during failed mounts & unmounts */
+	FREE(hfsmp->hfs_idhashtbl, M_HFSMNT);
+}
+
+/*
+from hfs_catalog.h:
+typedef struct cat_preflightid {
+	cnid_t fileid;
+	LIST_ENTRY(cat_preflightid) id_hash;
+} cat_preflightid_t;
+
+from hfs.h:
+  u_long hfs_idhash; / size of cnid/fileid hash table -1 /
+  LIST_HEAD(idhashhead, cat_preflightid) *hfs_idhashtbl; / base of ID hash /
+*/
+
+/* 
+ * Check the run-time ID hashtable.  
+ * 
+ * The catalog lock must be held (like other functions in this file).
+ *
+ * Returns: 
+ * 		1 if the ID is in the hash table.
+ *		0 if the ID is not in the hash table
+ */ 
+int cat_check_idhash (struct hfsmount *hfsmp, cnid_t test_fileid) {
+
+	cat_preflightid_t *preflight;
+	int found = 0;
+
+	for (preflight = IDHASH(hfsmp, test_fileid)->lh_first; preflight ; preflight = preflight->id_hash.le_next) {
+		if (preflight->fileid == test_fileid) {
+			found = 1;
+			break;	
+		}
+	}
+
+	return found;   	
+}
+
+/* Insert the supplied preflight into the ID hash table */ 
+int cat_insert_idhash (struct hfsmount *hfsmp, cat_preflightid_t *preflight) {
+
+	if (preflight) {
+		LIST_INSERT_HEAD(IDHASH(hfsmp, (preflight->fileid)), preflight, id_hash);
+		return 0;
+	}
+	return -1;
+}
+
+
+/* Remove the data structure with the specified ID from the hashtable */
+int cat_remove_idhash (cat_preflightid_t *preflight) {
+	
+	if ((preflight) && ((preflight->id_hash.le_next || preflight->id_hash.le_prev))) {
+		LIST_REMOVE (preflight, id_hash);
+		preflight->id_hash.le_next = NULL;
+		preflight->id_hash.le_prev = NULL;
+
+		return 0;
+	}
+
+	return -1;
+}
+
+/*
+ * Acquire a new CNID for use.  
+ * 
+ * This is slightly more complicated than just pulling the value from the
+ * hfsmount data structure.  We need to validate that the ID is not in-use
+ * even if we've not wrapped around and that there are not any lingering
+ * or orphaned fileIDs for this ID. 
+ *
+ * Also validate that there are not any pending insertions into the
+ * catalog by checking the ID hash table. 
+ */
+int 
+cat_acquire_cnid (struct hfsmount *hfsmp, cnid_t *new_cnid) 
+{
+	uint32_t nextCNID;
+	struct BTreeIterator *iterator;
+	FSBufferDescriptor btdata;
+	uint16_t datasize;
+	CatalogRecord *recp;
+	int result = 0;
+	int std_hfs;
+	int wrapped = 0;
+
+	std_hfs = (HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord);
+	/*
+	 * Get the next CNID. We can change it since we hold the catalog lock.
+	 */
+nextid:
+	nextCNID = hfsmp->vcbNxtCNID;
+	if (nextCNID == 0xFFFFFFFF) {
+		if (std_hfs) {
+			return (ENOSPC);
+		} else {
+			wrapped++;
+			if (wrapped > 1) {
+				/* don't allow more than one wrap-around */
+				return ENOSPC;
+			}
+			hfs_lock_mount (hfsmp);
+			hfsmp->vcbNxtCNID = kHFSFirstUserCatalogNodeID;
+			hfsmp->vcbAtrb |= kHFSCatalogNodeIDsReusedMask;
+			hfs_unlock_mount (hfsmp);
+		}
+	} else {
+		hfsmp->vcbNxtCNID++;
+	}
+	MarkVCBDirty(hfsmp);
+
+	/* First check that there are not any entries pending in the hash table with this ID */
+	if (cat_check_idhash (hfsmp, nextCNID)) {
+		/* Someone wants to insert this into the catalog but hasn't done so yet. Skip it */
+		goto nextid;
+	}
+
+	/* Check to see if a thread record exists for the target ID we just got */
+	MALLOC(iterator, BTreeIterator *, sizeof(*iterator), M_TEMP, M_WAITOK);
+	bzero(iterator, sizeof(*iterator));
+	buildthreadkey(nextCNID, std_hfs, (CatalogKey *)&iterator->key);
+
+	MALLOC(recp, CatalogRecord *, sizeof(CatalogRecord), M_TEMP, M_WAITOK);
+	BDINIT(btdata, recp);
+
+	result = BTSearchRecord(hfsmp->hfs_catalog_cp->c_datafork, iterator, &btdata, &datasize, iterator);
+	FREE (recp, M_TEMP);
+	FREE (iterator, M_TEMP);
+
+	if (result == btNotFound) {
+		/* Good.  File ID was not in use. Move on to checking EA B-Tree */
+		result = file_attribute_exist (hfsmp, nextCNID);
+		if (result == EEXIST) {
+			/* This CNID has orphaned EAs.  Skip it and move on to the next one */
+			result = 0;
+			goto nextid;
+		}
+		if (result) {
+			/* For any other error, return the result */
+			return result;
+		}
+
+		/*
+		 * Now validate that there are no lingering cnodes with this ID.  If a cnode
+		 * has been removed on-disk (marked C_NOEXISTS), but has not yet been reclaimed,
+		 * then it will still have an entry in the cnode hash table.  This means that
+		 * a subsequent lookup will find THAT entry and believe this one has been deleted
+		 * prematurely.  If there is a lingering cnode, then just skip this entry and move on.
+		 * 
+		 * Note that we pass (existence_only == 1) argument to hfs_chash_snoop.
+		 */
+		if (!std_hfs && (hfsmp->vcbAtrb & kHFSCatalogNodeIDsReusedMask)) {
+			if (hfs_chash_snoop (hfsmp, nextCNID, 1, NULL, NULL) == 0) {
+				goto nextid;
+			}
+		}
+
+		/* 
+		 * If we get here, then we didn't see any thread records, orphaned EAs, 
+	     * or stale cnodes. This ID is safe to vend out.
+		 */
+		*new_cnid = nextCNID;
+	}
+	else if (result == noErr) {
+		/* move on to the next ID */
+		goto nextid;
+	}	
+	else {
+		/* For any other situation, just bail out */
+		return EIO; 
+	}
+
+	return 0;	
+
+}
+>>>>>>> master-tracking
 
 int
 cat_preflight(struct hfsmount *hfsmp, catops_t ops, cat_cookie_t *cookie, __unused proc_t p)
@@ -180,11 +398,20 @@ cat_convertattr(
 {
 	int std_hfs = HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord;
 
+<<<<<<< HEAD
 	if (std_hfs) {
+=======
+	if (std_hfs == 0) {
+		getbsdattr(hfsmp, (struct HFSPlusCatalogFile *)recp, attrp);
+	}
+#if CONFIG_HFS_STD
+	else {
+>>>>>>> master-tracking
 		struct HFSPlusCatalogFile cnoderec;
 
 		promoteattr(hfsmp, recp, &cnoderec);
 		getbsdattr(hfsmp, &cnoderec, attrp);
+<<<<<<< HEAD
 	} else {
 		getbsdattr(hfsmp, (struct HFSPlusCatalogFile *)recp, attrp);
 	}
@@ -195,6 +422,21 @@ cat_convertattr(
 		promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, 0, datafp);
 		promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, 1, rsrcfp);
 	} else {
+=======
+	} 
+#endif
+
+	if (isadir(recp)) {
+		bzero(datafp, sizeof(*datafp));
+	}
+#if CONFIG_HFS_STD
+	else if (std_hfs) {
+		promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, 0, datafp);
+		promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, 1, rsrcfp);
+	} 
+#endif
+	else {
+>>>>>>> master-tracking
 		/* Convert the data fork. */
 		datafp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
 		datafp->cf_new_size = 0;
@@ -245,6 +487,7 @@ cat_convertkey(
 	int std_hfs = HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord;
 	HFSPlusCatalogKey * pluskey = NULL;
 	u_int32_t encoding;
+<<<<<<< HEAD
 
 	if (std_hfs) {
 		MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
@@ -260,6 +503,40 @@ cat_convertkey(
 		FREE(pluskey, M_TEMP);
 	}
 	return (0);
+=======
+	cnid_t cnid = 0;
+	int err = 0;
+
+	if (std_hfs == 0) {
+		pluskey = (HFSPlusCatalogKey *)key;
+		encoding = getencoding(recp);
+	}
+#if CONFIG_HFS_STD
+	else {
+		MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
+		promotekey(hfsmp, (HFSCatalogKey *)key, pluskey, &encoding);
+	}
+#endif
+  
+	/* Get the CNID before calling builddesc.  Need to error check it. */
+	cnid = getcnid(recp);
+	if (cnid == 0) {
+		/* If ths CNID == 0, it's invalid. Mark as corrupt */
+		hfs_mark_inconsistent (hfsmp, HFS_INCONSISTENCY_DETECTED);
+		err = EINVAL;
+	}
+	else {
+		builddesc(pluskey, cnid, 0, encoding, isadir(recp), descp);
+	}
+
+#if CONFIG_HFS_STD
+	if (std_hfs) {
+		FREE(pluskey, M_TEMP);
+	}
+#endif
+
+	return err;
+>>>>>>> master-tracking
 }
 
 
@@ -299,15 +576,26 @@ cat_releasedesc(struct cat_desc *descp)
  * catalog descriptor (when supplied outdescp is non-null).
  */
 int
+<<<<<<< HEAD
 cat_lookup(struct hfsmount *hfsmp, struct cat_desc *descp, int wantrsrc,
+=======
+cat_lookup(struct hfsmount *hfsmp, struct cat_desc *descp, int wantrsrc, int force_casesensitive_lookup,
+>>>>>>> master-tracking
              struct cat_desc *outdescp, struct cat_attr *attrp,
              struct cat_fork *forkp, cnid_t *desc_cnid)
 {
 	CatalogKey * keyp;
 	int std_hfs;
 	int result;
+<<<<<<< HEAD
 
 	std_hfs = (HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord);
+=======
+	int flags;
+
+	std_hfs = (HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord);
+	flags = force_casesensitive_lookup ? HFS_LOOKUP_CASESENSITIVE : 0;
+>>>>>>> master-tracking
 
 	MALLOC(keyp, CatalogKey *, sizeof(CatalogKey), M_TEMP, M_WAITOK);
 
@@ -315,7 +603,11 @@ cat_lookup(struct hfsmount *hfsmp, struct cat_desc *descp, int wantrsrc,
 	if (result)
 		goto exit;
 
+<<<<<<< HEAD
 	result = cat_lookupbykey(hfsmp, keyp, 0, descp->cd_hint, wantrsrc, outdescp, attrp, forkp, desc_cnid);
+=======
+	result = cat_lookupbykey(hfsmp, keyp, flags, descp->cd_hint, wantrsrc, outdescp, attrp, forkp, desc_cnid);
+>>>>>>> master-tracking
 	
 	if (result == ENOENT) {
 		if (!std_hfs) {
@@ -435,6 +727,7 @@ cat_findname(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *outdescp)
 
 	/* Turn thread record into a cnode key (in place). */
 	switch (recp->recordType) {
+<<<<<<< HEAD
 	case kHFSFolderThreadRecord:
 		isdir = 1;
 		/* fall through */
@@ -456,6 +749,37 @@ cat_findname(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *outdescp)
 		goto exit;
 	}
 	if (std_hfs) {
+=======
+
+#if CONFIG_HFS_STD
+		case kHFSFolderThreadRecord:
+			isdir = 1;
+			/* fall through */
+		case kHFSFileThreadRecord:
+			keyp = (CatalogKey *)((char *)&recp->hfsThread.reserved + 6);
+			keyp->hfs.keyLength = kHFSCatalogKeyMinimumLength + keyp->hfs.nodeName[0];
+			break;
+#endif
+
+		case kHFSPlusFolderThreadRecord:
+			isdir = 1;
+			/* fall through */
+		case kHFSPlusFileThreadRecord:
+			keyp = (CatalogKey *)&recp->hfsPlusThread.reserved;
+			keyp->hfsPlus.keyLength = kHFSPlusCatalogKeyMinimumLength +
+				(keyp->hfsPlus.nodeName.length * 2);
+			break;
+		default:
+			result = ENOENT;
+			goto exit;
+	}
+
+	if (std_hfs == 0) {
+		builddesc((HFSPlusCatalogKey *)keyp, cnid, 0, 0, isdir, outdescp);
+	}
+#if CONFIG_HFS_STD
+	else {
+>>>>>>> master-tracking
 		HFSPlusCatalogKey * pluskey = NULL;
 		u_int32_t encoding;
 
@@ -463,10 +787,16 @@ cat_findname(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *outdescp)
 		promotekey(hfsmp, &keyp->hfs, pluskey, &encoding);
 		builddesc(pluskey, cnid, 0, encoding, isdir, outdescp);
 		FREE(pluskey, M_TEMP);
+<<<<<<< HEAD
 
 	} else {
 		builddesc((HFSPlusCatalogKey *)keyp, cnid, 0, 0, isdir, outdescp);
 	}
+=======
+	}
+#endif	
+
+>>>>>>> master-tracking
 exit:
 	FREE(recp, M_TEMP);
 	FREE(iterator, M_TEMP);
@@ -508,6 +838,7 @@ cat_idlookup(struct hfsmount *hfsmp, cnid_t cnid, int allow_system_files, int wa
 
 	/* Turn thread record into a cnode key (in place) */
 	switch (recp->recordType) {
+<<<<<<< HEAD
 	case kHFSFileThreadRecord:
 	case kHFSFolderThreadRecord:
 		keyp = (CatalogKey *)((char *)&recp->hfsThread.reserved + 6);
@@ -538,6 +869,41 @@ cat_idlookup(struct hfsmount *hfsmp, cnid_t cnid, int allow_system_files, int wa
 	default:
 		result = ENOENT;
 		goto exit;
+=======
+
+#if CONFIG_HFS_STD
+		case kHFSFileThreadRecord:
+		case kHFSFolderThreadRecord:
+			keyp = (CatalogKey *)((char *)&recp->hfsThread.reserved + 6);
+
+			/* check for NULL name */
+			if (keyp->hfs.nodeName[0] == 0) {
+				result = ENOENT;
+				goto exit;
+			}
+
+			keyp->hfs.keyLength = kHFSCatalogKeyMinimumLength + keyp->hfs.nodeName[0];
+			break;
+#endif
+
+		case kHFSPlusFileThreadRecord:
+		case kHFSPlusFolderThreadRecord:
+			keyp = (CatalogKey *)&recp->hfsPlusThread.reserved;
+
+			/* check for NULL name */
+			if (keyp->hfsPlus.nodeName.length == 0) {
+				result = ENOENT;
+				goto exit;
+			}
+
+			keyp->hfsPlus.keyLength = kHFSPlusCatalogKeyMinimumLength +
+				(keyp->hfsPlus.nodeName.length * 2);
+			break;
+
+		default:
+			result = ENOENT;
+			goto exit;
+>>>>>>> master-tracking
 	}
 
 	result = cat_lookupbykey(hfsmp, keyp, 
@@ -594,7 +960,11 @@ cat_lookupmangled(struct hfsmount *hfsmp, struct cat_desc *descp, int wantrsrc,
 		return (ENOENT);
 	}
 
+<<<<<<< HEAD
 	result = cat_idlookup(hfsmp, fileID, 0,0,  outdescp, attrp, forkp);
+=======
+	result = cat_idlookup(hfsmp, fileID, 0, 0, outdescp, attrp, forkp);
+>>>>>>> master-tracking
 	if (result)
 		return (ENOENT);
 	/* It must be in the correct directory */
@@ -664,7 +1034,18 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 
 	/* Save the cnid, parentid, and encoding now in case there's a hard link or inode */
 	cnid = getcnid(recp);
+<<<<<<< HEAD
 	if (!std_hfs) {
+=======
+	if (cnid == 0) {
+		/* CNID of 0 is invalid.  Mark as corrupt */
+		hfs_mark_inconsistent (hfsmp, HFS_INCONSISTENCY_DETECTED);
+		result = EINVAL;
+		goto exit;
+	}
+
+	if (std_hfs == 0) {
+>>>>>>> master-tracking
 		parentid = keyp->hfsPlus.parentID;
 	}
 	
@@ -675,9 +1056,25 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 	if ((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) &&
 		((cnid == hfsmp->hfs_jnlfileid) || (cnid == hfsmp->hfs_jnlinfoblkid)) &&
 		 !(flags & HFS_LOOKUP_SYSFILE)) {
+<<<<<<< HEAD
 		result = ENOENT;
 		goto exit;
 	}
+=======
+		result = ERESERVEDNAME;
+		goto exit;
+	}
+
+	if (!std_hfs && !(hfsmp->hfs_flags & HFS_CASE_SENSITIVE)) {
+		/* Make sure the case of the file was correct if requested */
+		if (flags & HFS_LOOKUP_CASESENSITIVE) {
+			if (0 != cat_binarykeycompare(&keyp->hfsPlus, (HFSPlusCatalogKey *)&iterator->key)) {
+				result = ERESERVEDNAME;
+				goto exit;
+			}
+		}
+	}
+>>>>>>> master-tracking
 	
 	/*
 	 * When a hardlink link is encountered, auto resolve it.
@@ -706,6 +1103,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 		}
 	}
 
+<<<<<<< HEAD
 	if (attrp != NULL) {
 		if (std_hfs) {
 			struct HFSPlusCatalogFile cnoderec;
@@ -713,6 +1111,10 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 			promoteattr(hfsmp, recp, &cnoderec);
 			getbsdattr(hfsmp, &cnoderec, attrp);
 		} else {
+=======
+	if (attrp != NULL) { 
+		if (std_hfs == 0) {
+>>>>>>> master-tracking
 			getbsdattr(hfsmp, (struct HFSPlusCatalogFile *)recp, attrp);
 			if (ilink) {
 				/* Update the inode number for this hard link */
@@ -757,13 +1159,34 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 				}
 			}
 		}
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+		else {
+			struct HFSPlusCatalogFile cnoderec;
+
+			promoteattr(hfsmp, recp, &cnoderec);
+			getbsdattr(hfsmp, &cnoderec, attrp);	
+		}
+#endif
+>>>>>>> master-tracking
 	}
 	if (forkp != NULL) {
 		if (isadir(recp)) {
 			bzero(forkp, sizeof(*forkp));
+<<<<<<< HEAD
 		} else if (std_hfs) {
 			promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, wantrsrc, forkp);
 		} else if (wantrsrc) {
+=======
+		} 
+#if CONFIG_HFS_STD
+		else if (std_hfs) {
+			promotefork(hfsmp, (HFSCatalogFile *)&recp->hfsFile, wantrsrc, forkp);
+		} 
+#endif
+		else if (wantrsrc) {
+>>>>>>> master-tracking
 			/* Convert the resource fork. */
 			forkp->cf_size = recp->hfsPlusFile.resourceFork.logicalSize;
 			forkp->cf_new_size = 0;
@@ -832,7 +1255,11 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 				 * than that which is in its extent records.
 				 */
 
+<<<<<<< HEAD
 				(void) hfs_mark_volume_inconsistent (hfsmp);
+=======
+				(void) hfs_mark_inconsistent (hfsmp, HFS_INCONSISTENCY_DETECTED);
+>>>>>>> master-tracking
 
 				forkp->cf_blocks = validblks;
 				if (attrp != NULL) {
@@ -849,6 +1276,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 	if (descp != NULL) {
 		HFSPlusCatalogKey * pluskey = NULL;
 
+<<<<<<< HEAD
 		if (std_hfs) {
 			MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
 			promotekey(hfsmp, (HFSCatalogKey *)&iterator->key, pluskey, &encoding);
@@ -860,6 +1288,27 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int flags, u_int32_t h
 		if (std_hfs) {
 			FREE(pluskey, M_TEMP);
 		}
+=======
+		if (std_hfs == 0) {
+			pluskey = (HFSPlusCatalogKey *)&iterator->key;
+		}
+#if CONFIG_HFS_STD
+		else {
+			MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
+			promotekey(hfsmp, (HFSCatalogKey *)&iterator->key, pluskey, &encoding);
+	
+		}
+#endif	
+	
+		builddesc(pluskey, cnid, hint, encoding, isadir(recp), descp);
+
+#if CONFIG_HFS_STD
+		if (std_hfs) {
+			FREE(pluskey, M_TEMP);
+		}
+#endif
+
+>>>>>>> master-tracking
 	}
 
 	if (desc_cnid != NULL) {
@@ -883,13 +1332,20 @@ exit:
  * catalog descriptor (when supplied outdescp is non-null).
  */
 int
+<<<<<<< HEAD
 cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attrp,
+=======
+cat_create(struct hfsmount *hfsmp, cnid_t new_fileid, struct cat_desc *descp, struct cat_attr *attrp,
+>>>>>>> master-tracking
 	struct cat_desc *out_descp)
 {
 	FCB * fcb;
 	struct btobj * bto;
 	FSBufferDescriptor btdata;
+<<<<<<< HEAD
 	u_int32_t nextCNID;
+=======
+>>>>>>> master-tracking
 	u_int32_t datalen;
 	int std_hfs;
 	int result = 0;
@@ -901,6 +1357,7 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	fcb = hfsmp->hfs_catalog_cp->c_datafork;
 	std_hfs = (hfsmp->hfs_flags & HFS_STANDARD);
 
+<<<<<<< HEAD
 	/*
 	 * Get the next CNID. We can change it since we hold the catalog lock.
 	 */
@@ -919,6 +1376,10 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	}
 	MarkVCBDirty(hfsmp);
 
+=======
+	/* The caller is expected to reserve a CNID before calling this function! */
+	
+>>>>>>> master-tracking
 	/* Get space for iterator, key and data */	
 	MALLOC(bto, struct btobj *, sizeof(struct btobj), M_TEMP, M_WAITOK);
 	bto->iterator.hint.nodeNum = 0;
@@ -943,6 +1404,7 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 		btdata.itemSize = datalen;
 		btdata.itemCount = 1;
 		
+<<<<<<< HEAD
 		for (;;) {
 			// this call requires the attribute file lock to be held
 			result = file_attribute_exist(hfsmp, nextCNID);
@@ -995,13 +1457,28 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 		hfsmp->vcbNxtCNID = nextCNID + 1;
 		if (hfsmp->vcbNxtCNID < kHFSFirstUserCatalogNodeID) {
 			hfsmp->vcbNxtCNID = kHFSFirstUserCatalogNodeID;
+=======
+		/* Caller asserts the following:
+		 *	1) this CNID is not in use by any orphaned EAs 
+		 *  2) There are no lingering cnodes (removed on-disk but still in-core) with this CNID
+		 *  3) There are no thread or catalog records for this ID 
+		 */		 
+		buildthreadkey(new_fileid, std_hfs, (CatalogKey *) &bto->iterator.key);
+		result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
+		if (result) {
+			goto exit;
+>>>>>>> master-tracking
 		}
 	}
 
 	/*
 	 * Now insert the file/directory record
 	 */
+<<<<<<< HEAD
 	buildrecord(attrp, nextCNID, std_hfs, encoding, &bto->data, &datalen);
+=======
+	buildrecord(attrp, new_fileid, std_hfs, encoding, &bto->data, &datalen);
+>>>>>>> master-tracking
 	btdata.bufferAddress = &bto->data;
 	btdata.itemSize = datalen;
 	btdata.itemCount = 1;
@@ -1015,13 +1492,22 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 
 		/* Back out the thread record */
 		if (!std_hfs || S_ISDIR(attrp->ca_mode)) {
+<<<<<<< HEAD
 			buildthreadkey(nextCNID, std_hfs, (CatalogKey *)&bto->iterator.key);
+=======
+			buildthreadkey(new_fileid, std_hfs, (CatalogKey *)&bto->iterator.key);
+>>>>>>> master-tracking
 			if (BTDeleteRecord(fcb, &bto->iterator)) {
 				/* Error on deleting extra thread record, mark 
 				 * volume inconsistent 
 				 */
+<<<<<<< HEAD
 				printf ("hfs: cat_create() failed to delete thread record on volume %s\n", hfsmp->vcbVN);
 				hfs_mark_volume_inconsistent(hfsmp);
+=======
+				printf ("hfs: cat_create() failed to delete thread record id=%u on vol=%s\n", new_fileid, hfsmp->vcbVN);
+				hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+>>>>>>> master-tracking
 			}
 		}
 		goto exit;
@@ -1033,6 +1519,7 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	if (out_descp != NULL) {
 		HFSPlusCatalogKey * pluskey = NULL;
 
+<<<<<<< HEAD
 		if (std_hfs) {
 			MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
 			promotekey(hfsmp, (HFSCatalogKey *)&bto->iterator.key, pluskey, &encoding);
@@ -1047,6 +1534,28 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 		}
 	}
 	attrp->ca_fileid = nextCNID;
+=======
+		if (std_hfs == 0) {
+			pluskey = (HFSPlusCatalogKey *)&bto->iterator.key;
+		}
+#if CONFIG_HFS_STD
+		else {
+			MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
+			promotekey(hfsmp, (HFSCatalogKey *)&bto->iterator.key, pluskey, &encoding);
+		} 
+#endif
+
+		builddesc(pluskey, new_fileid, bto->iterator.hint.nodeNum,
+			encoding, S_ISDIR(attrp->ca_mode), out_descp);
+#if CONFIG_HFS_STD
+		if (std_hfs) {
+			FREE(pluskey, M_TEMP);
+		}
+#endif
+
+	}
+	attrp->ca_fileid = new_fileid;
+>>>>>>> master-tracking
 
 exit:
 	(void) BTFlushPath(fcb);
@@ -1219,9 +1728,19 @@ cat_rename (
 			out_cdp->cd_encoding = encoding;
 	}
 
+<<<<<<< HEAD
 	if (std_hfs && !directory &&
 	    !(recp->hfsFile.flags & kHFSThreadExistsMask))
 		skipthread = 1;
+=======
+#if CONFIG_HFS_STD
+	if (std_hfs && !directory &&
+	    !(recp->hfsFile.flags & kHFSThreadExistsMask)) {
+		skipthread = 1;
+	}
+#endif
+
+>>>>>>> master-tracking
 #if 0
 	/*
 	 * If the keys are identical then there's nothing left to do!
@@ -1239,6 +1758,10 @@ cat_rename (
 	result = BTInsertRecord(fcb, to_iterator, &btdata, datasize);
 	if (result == btExists) {
 		int fromtype = recp->recordType;
+<<<<<<< HEAD
+=======
+		cnid_t cnid = 0;
+>>>>>>> master-tracking
 
 		if (from_cdp->cd_parentcnid != to_cdp->cd_parentcnid)
 			goto exit; /* EEXIST */
@@ -1248,8 +1771,21 @@ cat_rename (
 		if (result)
 			goto exit;
 		
+<<<<<<< HEAD
 		if ((fromtype != recp->recordType) ||
 		    (from_cdp->cd_cnid != getcnid(recp))) {
+=======
+		/* Get the CNID after calling searchrecord */
+		cnid  = getcnid (recp);
+		if (cnid == 0) {
+			hfs_mark_inconsistent(hfsmp, HFS_INCONSISTENCY_DETECTED);
+			result = EINVAL;
+			goto exit;
+		}
+
+		if ((fromtype != recp->recordType) ||
+		    (from_cdp->cd_cnid != cnid)) {
+>>>>>>> master-tracking
 			result = EEXIST;
 			goto exit; /* EEXIST */
 		}
@@ -1268,8 +1804,13 @@ cat_rename (
 		       	int err;
 			err = BTInsertRecord(fcb, from_iterator, &btdata, datasize);
 			if (err) {
+<<<<<<< HEAD
 				printf("hfs: cat_create: could not undo (BTInsert = %d)", err);
 				hfs_mark_volume_inconsistent(hfsmp);
+=======
+				printf("hfs: cat_create: could not undo (BTInsert = %d)\n", err);
+				hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+>>>>>>> master-tracking
 				result = err;
 				goto exit;
 			}
@@ -1295,8 +1836,13 @@ cat_rename (
 		     	int err;
 			err = BTDeleteRecord(fcb, to_iterator);
 			if (err) {
+<<<<<<< HEAD
 				printf("hfs: cat_create: could not undo (BTDelete = %d)", err);
 				hfs_mark_volume_inconsistent(hfsmp);
+=======
+				printf("hfs: cat_create: could not undo (BTDelete = %d)\n", err);
+				hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+>>>>>>> master-tracking
 				result = err;
 				goto exit;
 			}
@@ -1337,7 +1883,15 @@ cat_rename (
 	if (out_cdp) {
 		HFSPlusCatalogKey * pluskey = NULL;
 
+<<<<<<< HEAD
 		if (std_hfs) {
+=======
+		if (std_hfs == 0) {	
+			pluskey = (HFSPlusCatalogKey *)&to_iterator->key;
+		}
+#if CONFIG_HFS_STD
+		else {
+>>>>>>> master-tracking
 			MALLOC(pluskey, HFSPlusCatalogKey *, sizeof(HFSPlusCatalogKey), M_TEMP, M_WAITOK);
 			promotekey(hfsmp, (HFSCatalogKey *)&to_iterator->key, pluskey, &encoding);
 
@@ -1348,6 +1902,7 @@ cat_rename (
 				realhint = hfs_pickencoding(pluskey->nodeName.unicode, pluskey->nodeName.length);
 				vcb->vcbFndrInfo[4] = SET_HFS_TEXT_ENCODING(realhint);
 			}
+<<<<<<< HEAD
 	
 		} else
 			pluskey = (HFSPlusCatalogKey *)&to_iterator->key;
@@ -1357,6 +1912,19 @@ cat_rename (
 		if (std_hfs) {
 			FREE(pluskey, M_TEMP);
 		}
+=======
+		}
+#endif
+
+		builddesc(pluskey, from_cdp->cd_cnid, to_iterator->hint.nodeNum,
+			encoding, directory, out_cdp);
+#if CONFIG_HFS_STD
+		if (std_hfs) {
+			FREE(pluskey, M_TEMP);
+		}
+#endif
+
+>>>>>>> master-tracking
 	}
 exit:
 	(void) BTFlushPath(fcb);
@@ -1455,8 +2023,13 @@ cat_delete(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	buildthreadkey(cnid, std_hfs, (CatalogKey *)&iterator->key);
 	if (BTDeleteRecord(fcb, iterator)) {
 		if (!std_hfs) {
+<<<<<<< HEAD
 			printf ("hfs: cat_delete() failed to delete thread record on volume %s\n", hfsmp->vcbVN);
 			hfs_mark_volume_inconsistent(hfsmp);
+=======
+			printf ("hfs: cat_delete() failed to delete thread record id=%u on vol=%s\n", cnid, hfsmp->vcbVN);
+			hfs_mark_inconsistent(hfsmp, HFS_OP_INCOMPLETE);
+>>>>>>> master-tracking
 		}
 	}
 
@@ -1475,16 +2048,26 @@ exit:
  */
 static int
 cat_update_internal(struct hfsmount *hfsmp, int update_hardlink, struct cat_desc *descp, struct cat_attr *attrp,
+<<<<<<< HEAD
 	struct cat_fork *dataforkp, struct cat_fork *rsrcforkp)
+=======
+	const struct cat_fork *dataforkp, const struct cat_fork *rsrcforkp)
+>>>>>>> master-tracking
 {
 	FCB * fcb;
 	BTreeIterator * iterator;
 	struct update_state state;
+<<<<<<< HEAD
 	int std_hfs;
 	int result;
 
 	fcb = hfsmp->hfs_catalog_cp->c_datafork;
 	std_hfs = (hfsmp->hfs_flags & HFS_STANDARD);
+=======
+	int result;
+
+	fcb = hfsmp->hfs_catalog_cp->c_datafork;
+>>>>>>> master-tracking
 
 	state.s_desc = descp;
 	state.s_attr = attrp;
@@ -1537,7 +2120,11 @@ exit:
  */
 int
 cat_update(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attrp,
+<<<<<<< HEAD
 	struct cat_fork *dataforkp, struct cat_fork *rsrcforkp)
+=======
+	const struct cat_fork *dataforkp, const struct cat_fork *rsrcforkp)
+>>>>>>> master-tracking
 {
 	return cat_update_internal(hfsmp, false, descp, attrp, dataforkp, rsrcforkp);
 }
@@ -1551,10 +2138,16 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 {
 	struct cat_desc *descp;
 	struct cat_attr *attrp;
+<<<<<<< HEAD
 	struct cat_fork *forkp;
 	struct hfsmount *hfsmp;
 	long blksize;
 	int i;
+=======
+	const struct cat_fork *forkp;
+	struct hfsmount *hfsmp;
+	long blksize;
+>>>>>>> master-tracking
 
 	descp   = state->s_desc;
 	attrp   = state->s_attr;
@@ -1562,6 +2155,11 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 	blksize = HFSTOVCB(hfsmp)->blockSize;
 
 	switch (crp->recordType) {
+<<<<<<< HEAD
+=======
+
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 	case kHFSFolderRecord: {
 		HFSCatalogFolder *dir;
 		
@@ -1580,7 +2178,12 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 	}
 	case kHFSFileRecord: {
 		HFSCatalogFile *file;
+<<<<<<< HEAD
 		
+=======
+		int i;
+
+>>>>>>> master-tracking
 		file = (struct HFSCatalogFile *)crp;
 		/* Do a quick sanity check */
 		if ((ckp->hfs.parentID != descp->cd_parentcnid) ||
@@ -1621,13 +2224,22 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 			file->flags &= ~kHFSFileLockedMask;
 		break;
 	}
+<<<<<<< HEAD
+=======
+#endif
+	
+>>>>>>> master-tracking
 	case kHFSPlusFolderRecord: {
 		HFSPlusCatalogFolder *dir;
 		
 		dir = (struct HFSPlusCatalogFolder *)crp;
 		/* Do a quick sanity check */
 		if (dir->folderID != attrp->ca_fileid) {
+<<<<<<< HEAD
 			printf("hfs: catrec_update: id %d != %d\n", dir->folderID, attrp->ca_fileid);
+=======
+			printf("hfs: catrec_update: id %d != %d, vol=%s\n", dir->folderID, attrp->ca_fileid, hfsmp->vcbVN);
+>>>>>>> master-tracking
 			return (btNotFound);
 		}
 		dir->flags            = attrp->ca_recflags;
@@ -1910,12 +2522,20 @@ cat_check_link_ancestry(struct hfsmount *hfsmp, cnid_t cnid, cnid_t pointed_at_c
 			break;
 		}
 		if ((result = getkey(hfsmp, cnid, (CatalogKey *)keyp))) {
+<<<<<<< HEAD
 			printf("hfs: cat_check_link_ancestry: getkey for %u failed\n", cnid);
+=======
+			printf("hfs: cat_check_link_ancestry: getkey failed id=%u, vol=%s\n", cnid, hfsmp->vcbVN);
+>>>>>>> master-tracking
 			invalid = 1;  /* On errors, assume an invalid parent */
 			break;
 		}
 		if ((result = BTSearchRecord(fcb, ip, &btdata, NULL, NULL))) {
+<<<<<<< HEAD
 			printf("hfs: cat_check_link_ancestry: cannot find %u\n", cnid);
+=======
+			printf("hfs: cat_check_link_ancestry: cannot find id=%u, vol=%s\n", cnid, hfsmp->vcbVN);
+>>>>>>> master-tracking
 			invalid = 1;  /* On errors, assume an invalid parent */
 			break;
 		}
@@ -1990,7 +2610,11 @@ cat_update_siblinglinks(struct hfsmount *hfsmp, cnid_t linkfileid, cnid_t prevli
 		result = BTUpdateRecord(fcb, iterator, (IterateCallBackProcPtr)update_siblinglinks_callback, &state);
 		(void) BTFlushPath(fcb);
 	} else {
+<<<<<<< HEAD
 		printf("hfs: cat_update_siblinglinks: couldn't resolve cnid %d\n", linkfileid);
+=======
+		printf("hfs: cat_update_siblinglinks: couldn't resolve cnid=%d, vol=%s\n", linkfileid, hfsmp->vcbVN);
+>>>>>>> master-tracking
 	}
 	
 	FREE (iterator, M_TEMP);
@@ -2072,6 +2696,7 @@ cat_lookup_siblinglinks(struct hfsmount *hfsmp, cnid_t linkfileid, cnid_t *prevl
 	if (file.flags & kHFSHasLinkChainMask) {
 		cnid_t parent;
 
+<<<<<<< HEAD
 		parent = ((HFSPlusCatalogKey *)&iterator->key)->parentID;
 
 		/* directory inodes don't have a chain (its in an EA) */
@@ -2089,6 +2714,128 @@ cat_lookup_siblinglinks(struct hfsmount *hfsmp, cnid_t linkfileid, cnid_t *prevl
 		*nextlinkid = 0;
 	}
 exit:
+=======
+		parent = ((HFSPlusCatalogKey *)&iterator->key)->parentID;
+
+		/* directory inodes don't have a chain (its in an EA) */
+		if (parent == hfsmp->hfs_private_desc[DIR_HARDLINKS].cd_cnid) {
+			result = ENOLINK;  /* signal to caller to get head of list */
+		} else if (parent == hfsmp->hfs_private_desc[FILE_HARDLINKS].cd_cnid) {
+			*prevlinkid = 0;
+			*nextlinkid = file.hl_firstLinkID;
+		} else {
+			*prevlinkid = file.hl_prevLinkID;
+			*nextlinkid = file.hl_nextLinkID;
+		}
+	} else {
+		*prevlinkid = 0;
+		*nextlinkid = 0;
+	}
+exit:
+	FREE(iterator, M_TEMP);		
+	return MacToVFSError(result);
+}
+
+
+/*
+ * cat_lookup_lastlink - find the last sibling link in the chain (no "next" ptr)
+ */
+int
+cat_lookup_lastlink(struct hfsmount *hfsmp, cnid_t linkfileid, 
+		cnid_t *lastlink, struct cat_desc *cdesc)
+{
+	FCB * fcb;
+	BTreeIterator * iterator;
+	struct FSBufferDescriptor btdata;
+	struct HFSPlusCatalogFile file;
+	int result;
+	int itercount = 0;
+	int foundlast = 0;
+	cnid_t currentlink = linkfileid;
+	
+	fcb = hfsmp->hfs_catalog_cp->c_datafork;
+	
+	/* Create an iterator for use by us temporarily */
+	MALLOC(iterator, BTreeIterator *, sizeof(*iterator), M_TEMP, M_WAITOK);
+
+	while ((foundlast == 0) && (itercount < HFS_LINK_MAX )) {
+		itercount++;
+		bzero(iterator, sizeof(*iterator));
+
+		if ((result = getkey(hfsmp, currentlink, (CatalogKey *)&iterator->key))) {
+			goto exit;
+		}
+		BDINIT(btdata, &file);
+
+		if ((result = BTSearchRecord(fcb, iterator, &btdata, NULL, NULL))) {
+			goto exit;
+		}
+
+		/* The prev/next chain is only valid when kHFSHasLinkChainMask is set. */
+		if (file.flags & kHFSHasLinkChainMask) {
+			cnid_t parent;
+
+			parent = ((HFSPlusCatalogKey *)&iterator->key)->parentID;
+			/* 
+			 * The raw inode for a directory hardlink doesn't have a chain.
+			 * Its link information lives in an EA. 
+			 */
+			if (parent == hfsmp->hfs_private_desc[DIR_HARDLINKS].cd_cnid) {
+				/* We don't iterate to find the oldest directory hardlink. */
+				result = ENOLINK; 
+				goto exit;
+			} 
+			else if (parent == hfsmp->hfs_private_desc[FILE_HARDLINKS].cd_cnid) {
+				/* Raw inode for file hardlink (the base inode) */
+				currentlink = file.hl_firstLinkID;
+			
+				/* 
+				 * One minor special-casing here is necessary.
+				 * If our ID brought us to the raw hardlink inode, and it does
+				 * not have any siblings, then it's an open-unlinked file, and we
+				 * should not proceed any further.
+				 */ 
+				if (currentlink == 0) {
+					result = ENOLINK;
+					goto exit;
+				}
+			} 
+			else {
+				/* Otherwise, this item's parent is a legitimate directory in the namespace */
+				if (file.hl_nextLinkID == 0) {
+					/* If nextLinkID is 0, then we found the end; no more hardlinks */
+					foundlast = 1;
+					*lastlink = currentlink;
+					/* 
+					 * Since we had to construct a catalog key to do this lookup
+					 * we still hold it in-hand.  We might as well use it to build 
+					 * the descriptor that the caller asked for.
+					 */
+					builddesc ((HFSPlusCatalogKey*)&iterator->key, currentlink, 0, 0, 0, cdesc);
+					break;
+				}
+
+				currentlink = file.hl_nextLinkID;
+			}
+		} 
+		else {
+			/* Sorry, can't help you without a link chain */
+			result = ENOLINK;
+			goto exit;
+		}
+	}
+exit:
+	/* If we didn't find what we were looking for, zero out the args */
+	if (foundlast == 0) {
+		if (cdesc) {
+			bzero (cdesc, sizeof(struct cat_desc));
+		}
+		if (lastlink) {
+			*lastlink = 0;
+		}
+	}
+
+>>>>>>> master-tracking
 	FREE(iterator, M_TEMP);		
 	return MacToVFSError(result);
 }
@@ -2126,6 +2873,7 @@ cat_createlink(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *
 	fcb = hfsmp->hfs_catalog_cp->c_datafork;
 
 	/*
+<<<<<<< HEAD
 	 * Get the next CNID. We can change it since we hold the catalog lock.
 	 */
 	nextCNID = hfsmp->vcbNxtCNID;
@@ -2138,6 +2886,14 @@ cat_createlink(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *
 		hfsmp->vcbNxtCNID++;
 	}
 	MarkVCBDirty(hfsmp);
+=======
+	 * Get the next CNID.  Note that we are currently holding catalog lock.
+	 */
+	result = cat_acquire_cnid(hfsmp, &nextCNID);
+	if (result) {
+		return result;
+	}
+>>>>>>> master-tracking
 
 	/* Get space for iterator, key and data */	
 	MALLOC(bto, struct btobj *, sizeof(struct btobj), M_TEMP, M_WAITOK);
@@ -2153,11 +2909,18 @@ cat_createlink(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *
 	/* This is our only chance to set the encoding (other than a rename). */
 	encoding = hfs_pickencoding(bto->key.nodeName.unicode, bto->key.nodeName.length);
 
+<<<<<<< HEAD
 	/* Insert the thread record first. */
+=======
+	/* 
+	 * Insert the thread record first.
+	 */
+>>>>>>> master-tracking
 	datalen = buildthread((void*)&bto->key, &bto->data, 0, 0);
 	btdata.bufferAddress = &bto->data;
 	btdata.itemSize = datalen;
 	btdata.itemCount = 1;
+<<<<<<< HEAD
 	
 	for (;;) {
 		buildthreadkey(nextCNID, 0, (CatalogKey *) &bto->iterator.key);
@@ -2206,6 +2969,15 @@ cat_createlink(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *
 			hfsmp->vcbNxtCNID = kHFSFirstUserCatalogNodeID;
 		}
 	}
+=======
+
+	buildthreadkey(nextCNID, 0, (CatalogKey *) &bto->iterator.key);
+	result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
+	if (result) {
+		goto exit;
+	}
+	thread_inserted = 1;
+>>>>>>> master-tracking
 
 	/*
 	 * Now insert the link record.
@@ -2241,12 +3013,21 @@ cat_createlink(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *
 exit:	
 	if (result) {
 		if (thread_inserted) {
+<<<<<<< HEAD
 			printf("hfs: cat_createlink: err %d from BTInsertRecord\n", MacToVFSError(result));
 
 			buildthreadkey(nextCNID, 0, (CatalogKey *)&bto->iterator.key);
 			if (BTDeleteRecord(fcb, &bto->iterator)) {
 	    			printf("hfs: cat_createlink() failed to delete thread record on volume %s\n", hfsmp->vcbVN);
 				hfs_mark_volume_inconsistent(hfsmp);
+=======
+			printf("hfs: cat_createlink: BTInsertRecord err=%d, vol=%s\n", MacToVFSError(result), hfsmp->vcbVN);
+
+			buildthreadkey(nextCNID, 0, (CatalogKey *)&bto->iterator.key);
+			if (BTDeleteRecord(fcb, &bto->iterator)) {
+				printf("hfs: cat_createlink() failed to delete thread record on volume %s\n", hfsmp->vcbVN);
+				hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+>>>>>>> master-tracking
 			}
 		}
 		if (alias_allocated && rsrcforkp->extents[0].startBlock != 0) {
@@ -2354,6 +3135,16 @@ cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalog
 			       HFS_ALLOC_FORCECONTIG | HFS_ALLOC_METAZONE, 
 	                       &rsrcforkp->extents[0].startBlock,
 	                       &rsrcforkp->extents[0].blockCount);
+<<<<<<< HEAD
+=======
+	/* Did it fail with an out of space error? If so, re-try and allow journal flushing. */
+	if (result == dskFulErr ) {	
+		result = BlockAllocate(hfsmp, 0, blkcount, blkcount, 
+			       HFS_ALLOC_FORCECONTIG | HFS_ALLOC_METAZONE | HFS_ALLOC_FLUSHTXN, 
+	                       &rsrcforkp->extents[0].startBlock,
+	                       &rsrcforkp->extents[0].blockCount);
+	}
+>>>>>>> master-tracking
 	if (result) {
 		rsrcforkp->extents[0].startBlock = 0;
 		goto exit;
@@ -2491,6 +3282,10 @@ struct readattr_state {
 	cnid_t	dir_cnid;
 	int stdhfs;
 	int error;
+<<<<<<< HEAD
+=======
+	int reached_eof;
+>>>>>>> master-tracking
 };
 
 static int
@@ -2510,10 +3305,20 @@ getentriesattr_callback(const CatalogKey *key, const CatalogRecord *rec,
 	switch(rec->recordType) {
 	case kHFSPlusFolderRecord:
 	case kHFSPlusFileRecord:
+<<<<<<< HEAD
 	case kHFSFolderRecord:
 	case kHFSFileRecord:
 		if (parentcnid != state->dir_cnid) {
 			state->error = ENOENT;
+=======
+#if CONFIG_HFS_STD
+	case kHFSFolderRecord:
+	case kHFSFileRecord:
+#endif
+		if (parentcnid != state->dir_cnid) {
+			state->error = ENOENT;
+			state->reached_eof = 1;
+>>>>>>> master-tracking
 			return (0);	/* stop */
 		}
 		break;
@@ -2541,8 +3346,36 @@ getentriesattr_callback(const CatalogKey *key, const CatalogRecord *rec,
 	}
 
 	cep = &list->entry[list->realentries++];
+<<<<<<< HEAD
 
 	if (state->stdhfs) {
+=======
+ 
+	if (state->stdhfs == 0) {
+		getbsdattr(hfsmp, (const struct HFSPlusCatalogFile *)rec, &cep->ce_attr);
+		builddesc((const HFSPlusCatalogKey *)key, getcnid(rec), 0, getencoding(rec),
+				isadir(rec), &cep->ce_desc);
+
+		if (rec->recordType == kHFSPlusFileRecord) {
+			cep->ce_datasize = rec->hfsPlusFile.dataFork.logicalSize;
+			cep->ce_datablks = rec->hfsPlusFile.dataFork.totalBlocks;
+			cep->ce_rsrcsize = rec->hfsPlusFile.resourceFork.logicalSize;
+			cep->ce_rsrcblks = rec->hfsPlusFile.resourceFork.totalBlocks;
+
+			/* Save link reference for later processing. */
+			if ((SWAP_BE32(rec->hfsPlusFile.userInfo.fdType) == kHardLinkFileType) &&
+					(SWAP_BE32(rec->hfsPlusFile.userInfo.fdCreator) == kHFSPlusCreator)) {
+				cep->ce_attr.ca_linkref = rec->hfsPlusFile.bsdInfo.special.iNodeNum;
+			} else if ((rec->hfsPlusFile.flags & kHFSHasLinkChainMask) && 
+					(SWAP_BE32(rec->hfsPlusFile.userInfo.fdType) == kHFSAliasType) && 
+					(SWAP_BE32(rec->hfsPlusFile.userInfo.fdCreator) == kHFSAliasCreator)) {
+				cep->ce_attr.ca_linkref = rec->hfsPlusFile.bsdInfo.special.iNodeNum;
+			}
+		}
+	}
+#if CONFIG_HFS_STD
+	else {
+>>>>>>> master-tracking
 		struct HFSPlusCatalogFile cnoderec;
 		HFSPlusCatalogKey * pluskey;
 		u_int32_t encoding;
@@ -2563,6 +3396,7 @@ getentriesattr_callback(const CatalogKey *key, const CatalogRecord *rec,
 			cep->ce_rsrcsize = rec->hfsFile.rsrcLogicalSize;
 			cep->ce_rsrcblks = rec->hfsFile.rsrcPhysicalSize / blksize;
 		}
+<<<<<<< HEAD
 	} else {
 		getbsdattr(hfsmp, (const struct HFSPlusCatalogFile *)rec, &cep->ce_attr);
 		builddesc((const HFSPlusCatalogKey *)key, getcnid(rec), 0, getencoding(rec),
@@ -2585,6 +3419,10 @@ getentriesattr_callback(const CatalogKey *key, const CatalogRecord *rec,
 			}
 		}
 	}
+=======
+	}
+#endif
+>>>>>>> master-tracking
 
 	return (list->realentries < list->maxentries);
 }
@@ -2595,7 +3433,11 @@ getentriesattr_callback(const CatalogKey *key, const CatalogRecord *rec,
  * Note: index is zero relative
  */
 int
+<<<<<<< HEAD
 cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_entrylist *ce_list)
+=======
+cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_entrylist *ce_list, int *reachedeof)
+>>>>>>> master-tracking
 {
 	FCB* fcb;
 	CatalogKey * key;
@@ -2607,6 +3449,10 @@ cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_
 	int index;
 	int have_key;
 	int result = 0;
+<<<<<<< HEAD
+=======
+	int reached_eof = 0;
+>>>>>>> master-tracking
 
 	ce_list->realentries = 0;
 
@@ -2614,6 +3460,11 @@ cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_
 	std_hfs = (HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord);
 	parentcnid = dirhint->dh_desc.cd_parentcnid;
 
+<<<<<<< HEAD
+=======
+	bzero (&state, sizeof(struct readattr_state));
+
+>>>>>>> master-tracking
 	state.hfsmp = hfsmp;
 	state.list = ce_list;
 	state.dir_cnid = parentcnid;
@@ -2670,7 +3521,19 @@ cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_
 				result = ps.error;
 			else
 				result = MacToVFSError(result);
+<<<<<<< HEAD
 			if (result) {
+=======
+			
+			if (result) {
+				/*
+				* Note: the index may now point to EOF if the directory
+				* was modified in between system calls. We will return
+				* ENOENT from cat_findposition if this is the case, and
+				* when we bail out with an error, our caller (hfs_readdirattr_internal)
+				* will suppress the error and indicate EOF to its caller.
+				*/
+>>>>>>> master-tracking
 				result = MacToVFSError(result);
 				goto exit;
 			}
@@ -2681,12 +3544,26 @@ cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_
 	result = BTIterateRecords(fcb, kBTreeNextRecord, iterator,
 			(IterateCallBackProcPtr)getentriesattr_callback, &state);
 
+<<<<<<< HEAD
 	if (state.error)
 		result = state.error;
 	else if (ce_list->realentries == 0)
 		result = ENOENT;
 	else
 		result = MacToVFSError(result);
+=======
+	if (state.error) {
+		result = state.error;
+		reached_eof = state.reached_eof;
+	}
+	else if (ce_list->realentries == 0) {
+		result = ENOENT;
+		reached_eof = 1;
+	}
+	else {
+		result = MacToVFSError(result);
+	}
+>>>>>>> master-tracking
 
 	if (std_hfs)
 		goto exit;
@@ -2730,9 +3607,16 @@ cat_getentriesattr(struct hfsmount *hfsmp, directoryhint_t *dirhint, struct cat_
 			cep->ce_rsrcblks = filerec.resourceFork.totalBlocks;
 		}
 	}
+<<<<<<< HEAD
 exit:
 	FREE(iterator, M_TEMP);
 	
+=======
+
+exit:
+	FREE(iterator, M_TEMP);
+	*reachedeof = reached_eof;
+>>>>>>> master-tracking
 	return MacToVFSError(result);
 }
 
@@ -2857,7 +3741,11 @@ getdirentries_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 			 * handle a longer name).  In that case, NFS will ask us
 			 * to mangle the name to keep it short enough.
 			 */
+<<<<<<< HEAD
 			maxnamelen = NAME_MAX;
+=======
+			maxnamelen = NAME_MAX + 1;
+>>>>>>> master-tracking
 		} else {
 			maxnamelen = sizeof(entry->d_name);
 		}
@@ -2951,7 +3839,11 @@ getdirentries_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 		} else {
 encodestr:
 			result = utf8_encodestr(cnp->ustr.unicode, namelen * sizeof(UniChar),
+<<<<<<< HEAD
 						nameptr, &namelen, maxnamelen + 1, ':', 0);
+=======
+						nameptr, &namelen, maxnamelen, ':', 0);
+>>>>>>> master-tracking
 		}
 
 		/* Check result returned from encoding the filename to utf8 */
@@ -2970,7 +3862,11 @@ encodestr:
 			}
 
 			result = ConvertUnicodeToUTF8Mangled(cnp->ustr.length * sizeof(UniChar),
+<<<<<<< HEAD
 							     cnp->ustr.unicode, maxnamelen + 1,
+=======
+							     cnp->ustr.unicode, maxnamelen,
+>>>>>>> master-tracking
 							     (ByteCount*)&namelen, nameptr, linkid);		
 			is_mangled = 1;
 		}
@@ -3100,6 +3996,10 @@ encodestr:
 		uio_resid(state->cbs_uio) >= SMALL_DIRENTRY_SIZE);
 }
 
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 /*
  * getdirentries callback for standard HFS (non HFS+) directories.
  */
@@ -3131,7 +4031,11 @@ getdirentries_std_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 	}
 
 	nameptr = (u_int8_t *)&catent.d_name[0];
+<<<<<<< HEAD
 	maxnamelen = NAME_MAX;
+=======
+	maxnamelen = sizeof(catent.d_name);
+>>>>>>> master-tracking
 
 	switch(crp->recordType) {
 	case kHFSFolderRecord:
@@ -3147,13 +4051,21 @@ getdirentries_std_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 	};
 
 	cnp = (const CatalogName*) ckp->hfs.nodeName;
+<<<<<<< HEAD
 	result = hfs_to_utf8(hfsmp, cnp->pstr, maxnamelen + 1, (ByteCount *)&namelen, nameptr);
+=======
+	result = hfs_to_utf8(hfsmp, cnp->pstr, maxnamelen, (ByteCount *)&namelen, nameptr);
+>>>>>>> master-tracking
 	/*
 	 * When an HFS name cannot be encoded with the current
 	 * volume encoding we use MacRoman as a fallback.
 	 */
 	if (result) {
+<<<<<<< HEAD
 		result = mac_roman_to_utf8(cnp->pstr, maxnamelen + 1, (ByteCount *)&namelen, nameptr);
+=======
+		result = mac_roman_to_utf8(cnp->pstr, maxnamelen, (ByteCount *)&namelen, nameptr);
+>>>>>>> master-tracking
 	}
 	catent.d_type = type;
 	catent.d_namlen = namelen;
@@ -3187,6 +4099,10 @@ getdirentries_std_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 	/* Continue iteration if there's room */
 	return (state->cbs_result == 0  && uio_resid(state->cbs_uio) >= SMALL_DIRENTRY_SIZE);
 }
+<<<<<<< HEAD
+=======
+#endif
+>>>>>>> master-tracking
 
 /*
  * Pack a uio buffer with directory entries from the catalog
@@ -3305,6 +4221,18 @@ cat_getdirentries(struct hfsmount *hfsmp, u_int32_t entrycnt, directoryhint_t *d
 				result = MacToVFSError(result);
 			if (result) {
 				result = MacToVFSError(result);
+<<<<<<< HEAD
+=======
+				if (result == ENOENT) {
+					/*
+					 * ENOENT means we've hit the EOF.
+					 * suppress the error, and set the eof flag.
+					 */
+					result = 0;
+					dirhint->dh_desc.cd_flags |= CD_EOF;
+					*eofflag = 1;
+				}
+>>>>>>> master-tracking
 				goto cleanup;
 			}
 		}
@@ -3337,10 +4265,15 @@ cat_getdirentries(struct hfsmount *hfsmp, u_int32_t entrycnt, directoryhint_t *d
 	/*
 	 * Process as many entries as possible starting at iterator->key.
 	 */
+<<<<<<< HEAD
 	if (hfsmp->hfs_flags & HFS_STANDARD)
 		result = BTIterateRecords(fcb, op, iterator,
 	                          (IterateCallBackProcPtr)getdirentries_std_callback, &state);
 	else {
+=======
+	if ((hfsmp->hfs_flags & HFS_STANDARD) == 0) {
+		/* HFS+ */
+>>>>>>> master-tracking
 		result = BTIterateRecords(fcb, op, iterator,
 	                          (IterateCallBackProcPtr)getdirentries_callback, &state);
 	
@@ -3361,6 +4294,16 @@ cat_getdirentries(struct hfsmount *hfsmp, u_int32_t entrycnt, directoryhint_t *d
 			result = getdirentries_callback(&ckp, &crp, &state);
 		}
 	}
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+	else {
+		/* HFS (standard) */
+		result = BTIterateRecords(fcb, op, iterator,
+	                          (IterateCallBackProcPtr)getdirentries_std_callback, &state);
+	}
+#endif
+>>>>>>> master-tracking
 
 	/* Note that state.cbs_index is still valid on errors */
 	*items = state.cbs_index - index;
@@ -3448,6 +4391,7 @@ static int
 cat_findposition(const CatalogKey *ckp, const CatalogRecord *crp,
                  struct position_state *state)
 {
+<<<<<<< HEAD
 	cnid_t curID;
 
 	if (state->hfsmp->hfs_flags & HFS_STANDARD)
@@ -3458,6 +4402,26 @@ cat_findposition(const CatalogKey *ckp, const CatalogRecord *crp,
 	/* Make sure parent directory didn't change */
 	if (state->parentID != curID) {
 		state->error = EINVAL;
+=======
+	cnid_t curID = 0;
+
+	if ((state->hfsmp->hfs_flags & HFS_STANDARD) == 0) {
+		curID = ckp->hfsPlus.parentID;
+	}
+#if CONFIG_HFS_STD
+	else {
+		curID = ckp->hfs.parentID;
+	}
+#endif
+
+	/* Make sure parent directory didn't change */
+	if (state->parentID != curID) {
+		/*
+		 * The parent ID is different from curID this means we've hit
+		 * the EOF for the directory.
+		 */
+		state->error = ENOENT;
+>>>>>>> master-tracking
 		return (0);  /* stop */
 	}
 
@@ -3465,8 +4429,15 @@ cat_findposition(const CatalogKey *ckp, const CatalogRecord *crp,
 	switch(crp->recordType) {
 	case kHFSPlusFolderRecord:
 	case kHFSPlusFileRecord:
+<<<<<<< HEAD
 	case kHFSFolderRecord:
 	case kHFSFileRecord:
+=======
+#if CONFIG_HFS_STD
+	case kHFSFolderRecord:
+	case kHFSFileRecord:
+#endif
+>>>>>>> master-tracking
 		++state->count;
 		break;
 	default:
@@ -3505,6 +4476,7 @@ cat_binarykeycompare(HFSPlusCatalogKey *searchKey, HFSPlusCatalogKey *trialKey)
 		u_int16_t * str2 = &trialKey->nodeName.unicode[0];
 		int length1 = searchKey->nodeName.length;
 		int length2 = trialKey->nodeName.length;
+<<<<<<< HEAD
 		u_int16_t c1, c2;
 		int length;
 	
@@ -3531,12 +4503,20 @@ cat_binarykeycompare(HFSPlusCatalogKey *searchKey, HFSPlusCatalogKey *trialKey)
 				break;
 			}
 		}
+=======
+
+		result = UnicodeBinaryCompare (str1, length1, str2, length2);
+>>>>>>> master-tracking
 	}
 
 	return result;
 }
 
 
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 /*
  * Compare two standard HFS catalog keys
  *
@@ -3562,6 +4542,10 @@ CompareCatalogKeys(HFSCatalogKey *searchKey, HFSCatalogKey *trialKey)
 
 	return result;
 }
+<<<<<<< HEAD
+=======
+#endif
+>>>>>>> master-tracking
 
 
 /*
@@ -3607,9 +4591,20 @@ static int
 buildkey(struct hfsmount *hfsmp, struct cat_desc *descp,
 	HFSPlusCatalogKey *key, int retry)
 {
+<<<<<<< HEAD
 	int utf8_flags = UTF_ESCAPE_ILLEGAL;
 	int result = 0;
 	size_t unicodeBytes = 0;
+=======
+	int std_hfs = (hfsmp->hfs_flags & HFS_STANDARD);
+	int utf8_flags = UTF_ESCAPE_ILLEGAL;
+	int result = 0;
+	size_t unicodeBytes = 0;
+	
+	if (std_hfs == 0) {
+		retry = 0;
+	}
+>>>>>>> master-tracking
 
 	if (descp->cd_namelen == 0 || descp->cd_nameptr[0] == '\0')
 		return (EINVAL);  /* invalid name */
@@ -3633,12 +4628,20 @@ buildkey(struct hfsmount *hfsmp, struct cat_desc *descp,
 		return (result);
 	}
 
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 	/*
 	 * For HFS volumes convert to an HFS compatible key
 	 *
 	 * XXX need to save the encoding that succeeded
 	 */
+<<<<<<< HEAD
 	if (HFSTOVCB(hfsmp)->vcbSigWord == kHFSSigWord) {
+=======
+	if (std_hfs) {
+>>>>>>> master-tracking
 		HFSCatalogKey hfskey;
 
 		bzero(&hfskey, sizeof(hfskey));
@@ -3660,6 +4663,11 @@ buildkey(struct hfsmount *hfsmp, struct cat_desc *descp,
 		}
 		bcopy(&hfskey, key, sizeof(hfskey));
 	}
+<<<<<<< HEAD
+=======
+#endif
+
+>>>>>>> master-tracking
 	return (0);
  }
 
@@ -3708,7 +4716,11 @@ cat_resolvelink(struct hfsmount *hfsmp, u_int32_t linkref, int isdirlink, struct
 		if (recp->hl_linkCount == 0)
 			recp->hl_linkCount = 2;
 	} else {
+<<<<<<< HEAD
 		printf("hfs: cat_resolvelink: can't find %s\n", inodename);
+=======
+		printf("hfs: cat_resolvelink: can't find inode=%s on vol=%s\n", inodename, hfsmp->vcbVN);
+>>>>>>> master-tracking
 	}
 
 	FREE(iterator, M_TEMP);
@@ -3771,12 +4783,21 @@ getkey(struct hfsmount *hfsmp, cnid_t cnid, CatalogKey * key)
 
 	/* Turn thread record into a cnode key (in place) */
 	switch (recp->recordType) {
+<<<<<<< HEAD
+=======
+
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 	case kHFSFileThreadRecord:
 	case kHFSFolderThreadRecord:
 		keyp = (CatalogKey *)((char *)&recp->hfsThread.reserved + 6);
 		keyp->hfs.keyLength = kHFSCatalogKeyMinimumLength + keyp->hfs.nodeName[0];
 		bcopy(keyp, key, keyp->hfs.keyLength + 1);
 		break;
+<<<<<<< HEAD
+=======
+#endif
+>>>>>>> master-tracking
 
 	case kHFSPlusFileThreadRecord:
 	case kHFSPlusFolderThreadRecord:
@@ -3854,6 +4875,7 @@ buildrecord(struct cat_attr *attrp, cnid_t cnid, int std_hfs, u_int32_t encoding
 	int type = attrp->ca_mode & S_IFMT;
 	u_int32_t createtime = to_hfs_time(attrp->ca_itime);
 
+<<<<<<< HEAD
 	if (std_hfs) {
 		createtime = UTCToLocal(createtime);
 		if (type == S_IFDIR) {
@@ -3875,6 +4897,9 @@ buildrecord(struct cat_attr *attrp, cnid_t cnid, int std_hfs, u_int32_t encoding
 			*recordSize = sizeof(HFSCatalogFile);
 		}
 	} else {
+=======
+	if (std_hfs == 0) {
+>>>>>>> master-tracking
 		struct HFSPlusBSDInfo * bsdp = NULL;
 
 		if (type == S_IFDIR) {
@@ -3922,6 +4947,33 @@ buildrecord(struct cat_attr *attrp, cnid_t cnid, int std_hfs, u_int32_t encoding
 		bsdp->adminFlags = attrp->ca_flags >> 16;
 		bsdp->ownerFlags = attrp->ca_flags & 0x000000FF;
 	}
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+	else {
+		createtime = UTCToLocal(createtime);
+		if (type == S_IFDIR) {
+			bzero(crp, sizeof(HFSCatalogFolder));
+			crp->recordType = kHFSFolderRecord;
+			crp->hfsFolder.folderID = cnid;
+			crp->hfsFolder.createDate = createtime;
+			crp->hfsFolder.modifyDate = createtime;
+			bcopy(attrp->ca_finderinfo, &crp->hfsFolder.userInfo, 32);
+			*recordSize = sizeof(HFSCatalogFolder);
+		} else {
+			bzero(crp, sizeof(HFSCatalogFile));
+			crp->recordType = kHFSFileRecord;
+			crp->hfsFile.fileID = cnid;
+			crp->hfsFile.createDate = createtime;
+			crp->hfsFile.modifyDate = createtime;
+			bcopy(attrp->ca_finderinfo, &crp->hfsFile.userInfo, 16);
+			bcopy(&attrp->ca_finderinfo[16], &crp->hfsFile.finderInfo, 16);
+			*recordSize = sizeof(HFSCatalogFile);
+		}
+	}
+#endif
+
+>>>>>>> master-tracking
 }
 
 
@@ -4091,6 +5143,10 @@ getbsdattr(struct hfsmount *hfsmp, const struct HFSPlusCatalogFile *crp, struct 
 	bcopy(&crp->userInfo, attrp->ca_finderinfo, 32);
 }
 
+<<<<<<< HEAD
+=======
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 /*
  * promotekey - promote hfs key to hfs plus key
  *
@@ -4205,6 +5261,10 @@ promoteattr(struct hfsmount *hfsmp, const CatalogRecord *dataPtr, struct HFSPlus
 	crp->accessDate = crp->contentModDate;
 	bzero(&crp->bsdInfo, sizeof(HFSPlusBSDInfo));
 }
+<<<<<<< HEAD
+=======
+#endif
+>>>>>>> master-tracking
 
 /*
  * Build a catalog node thread record from a catalog key
@@ -4215,6 +5275,7 @@ buildthread(void *keyp, void *recp, int std_hfs, int directory)
 {
 	int size = 0;
 
+<<<<<<< HEAD
 	if (std_hfs) {
 		HFSCatalogKey *key = (HFSCatalogKey *)keyp;
 		HFSCatalogThread *rec = (HFSCatalogThread *)recp;
@@ -4229,6 +5290,9 @@ buildthread(void *keyp, void *recp, int std_hfs, int directory)
 		bcopy(key->nodeName, rec->nodeName, key->nodeName[0]+1);
 
 	} else /* HFS+ */ {
+=======
+	if (std_hfs == 0) {
+>>>>>>> master-tracking
 		HFSPlusCatalogKey *key = (HFSPlusCatalogKey *)keyp;
 		HFSPlusCatalogThread *rec = (HFSPlusCatalogThread *)recp;
 
@@ -4242,11 +5306,36 @@ buildthread(void *keyp, void *recp, int std_hfs, int directory)
 		bcopy(&key->nodeName, &rec->nodeName,
 			sizeof(UniChar) * (key->nodeName.length + 1));
 
+<<<<<<< HEAD
 		/* HFS Plus has varaible sized thread records */
 		size -= (sizeof(rec->nodeName.unicode) -
 			  (rec->nodeName.length * sizeof(UniChar)));
 	}
 	
+=======
+		/* HFS Plus has variable sized thread records */
+		size -= (sizeof(rec->nodeName.unicode) -
+			  (rec->nodeName.length * sizeof(UniChar)));
+
+	}
+#if CONFIG_HFS_STD
+	else {
+		HFSCatalogKey *key = (HFSCatalogKey *)keyp;
+		HFSCatalogThread *rec = (HFSCatalogThread *)recp;
+
+		size = sizeof(HFSCatalogThread);
+		bzero(rec, size);
+		if (directory)
+			rec->recordType = kHFSFolderThreadRecord;
+		else
+			rec->recordType = kHFSFileThreadRecord;
+		rec->parentID = key->parentID;
+		bcopy(key->nodeName, rec->nodeName, key->nodeName[0]+1);
+
+	} 
+#endif
+
+>>>>>>> master-tracking
 	return (size);
 }
 
@@ -4256,16 +5345,32 @@ buildthread(void *keyp, void *recp, int std_hfs, int directory)
 static void
 buildthreadkey(HFSCatalogNodeID parentID, int std_hfs, CatalogKey *key)
 {
+<<<<<<< HEAD
 	if (std_hfs) {
+=======
+	if (std_hfs == 0) {
+		key->hfsPlus.keyLength = kHFSPlusCatalogKeyMinimumLength;
+		key->hfsPlus.parentID = parentID;
+		key->hfsPlus.nodeName.length = 0;
+	}
+#if CONFIG_HFS_STD
+	else {
+>>>>>>> master-tracking
 		key->hfs.keyLength = kHFSCatalogKeyMinimumLength;
 		key->hfs.reserved = 0;
 		key->hfs.parentID = parentID;
 		key->hfs.nodeName[0] = 0;
+<<<<<<< HEAD
 	} else {
 		key->hfsPlus.keyLength = kHFSPlusCatalogKeyMinimumLength;
 		key->hfsPlus.parentID = parentID;
 		key->hfsPlus.nodeName.length = 0;
 	}
+=======
+	}
+#endif
+
+>>>>>>> master-tracking
 }
 
 /*
@@ -4295,12 +5400,22 @@ getcnid(const CatalogRecord *crp)
 	cnid_t cnid = 0;
 
 	switch (crp->recordType) {
+<<<<<<< HEAD
+=======
+
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 	case kHFSFolderRecord:
 		cnid = crp->hfsFolder.folderID;
 		break;
 	case kHFSFileRecord:
 		cnid = crp->hfsFile.fileID;
 		break;
+<<<<<<< HEAD
+=======
+#endif
+
+>>>>>>> master-tracking
 	case kHFSPlusFolderRecord:
 		cnid = crp->hfsPlusFolder.folderID;
 		break;
@@ -4308,7 +5423,11 @@ getcnid(const CatalogRecord *crp)
 		cnid = crp->hfsPlusFile.fileID;
 		break;
 	default:
+<<<<<<< HEAD
 		panic("hfs: getcnid: unknown recordType (crp @ %p)\n", crp);
+=======
+		printf("hfs: getcnid: unknown recordType=%d\n", crp->recordType);
+>>>>>>> master-tracking
 		break;
 	}
 
@@ -4324,10 +5443,19 @@ getparentcnid(const CatalogRecord *recp)
 	cnid_t cnid = 0;
 
 	switch (recp->recordType) {
+<<<<<<< HEAD
+=======
+
+#if CONFIG_HFS_STD
+>>>>>>> master-tracking
 	case kHFSFileThreadRecord:
 	case kHFSFolderThreadRecord:
 		cnid = recp->hfsThread.parentID;
 		break;
+<<<<<<< HEAD
+=======
+#endif
+>>>>>>> master-tracking
 
 	case kHFSPlusFileThreadRecord:
 	case kHFSPlusFolderThreadRecord:
@@ -4347,8 +5475,21 @@ getparentcnid(const CatalogRecord *recp)
 static int 
 isadir(const CatalogRecord *crp)
 {
+<<<<<<< HEAD
 	return (crp->recordType == kHFSFolderRecord ||
 		crp->recordType == kHFSPlusFolderRecord);
+=======
+	if (crp->recordType == kHFSPlusFolderRecord) {
+		return 1;
+	}
+#if CONFIG_HFS_STD
+	if (crp->recordType == kHFSFolderRecord) {
+		return 1;
+	}
+#endif
+
+	return 0;
+>>>>>>> master-tracking
 }
 
 /*
@@ -4414,13 +5555,21 @@ cat_lookup_dirlink(struct hfsmount *hfsmp, cnid_t dirlink_id,
 	}
 	if (error) {
 		printf ("hfs: cat_lookup_dirlink(): Error looking up file record for id=%u (error=%d)\n", dirlink_id, error);
+<<<<<<< HEAD
 		hfs_mark_volume_inconsistent(hfsmp);
+=======
+		hfs_mark_inconsistent(hfsmp, HFS_INCONSISTENCY_DETECTED);
+>>>>>>> master-tracking
 		goto out;
 	}
 	/* Just for sanity, make sure that id in catalog record and thread record match */
 	if ((outdescp != NULL) && (dirlink_id != outdescp->cd_cnid)) {
 		printf ("hfs: cat_lookup_dirlink(): Requested cnid=%u != found_cnid=%u\n", dirlink_id, outdescp->cd_cnid);
+<<<<<<< HEAD
 		hfs_mark_volume_inconsistent(hfsmp);
+=======
+		hfs_mark_inconsistent(hfsmp, HFS_INCONSISTENCY_DETECTED);
+>>>>>>> master-tracking
 		error = ENOENT;
 	}
 
@@ -4447,3 +5596,7 @@ cat_update_dirlink(struct hfsmount *hfsmp, u_int8_t forktype,
 		return cat_update_internal(hfsmp, true, descp, attrp, forkp, NULL);
 	} 
 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> master-tracking
