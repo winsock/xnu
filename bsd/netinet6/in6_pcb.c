@@ -200,6 +200,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		return (EINVAL);
 	if (!(so->so_options & (SO_REUSEADDR|SO_REUSEPORT)))
 		wild = 1;
+
 	socket_unlock(so, 0); /* keep reference */
 	lck_rw_lock_exclusive(pcbinfo->ipi_lock);
 
@@ -367,6 +368,16 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	}
 
 	socket_lock(so, 0);
+	/*
+	 * We unlocked socket's protocol lock for a long time.
+	 * The socket might have been dropped/defuncted.
+	 * Checking if world has changed since.
+	 */
+	if (inp->inp_state == INPCB_STATE_DEAD) {
+		lck_rw_done(pcbinfo->ipi_lock);
+		return (ECONNABORTED);
+	}
+
 	/* check if the socket got bound when the lock was released */
 	if (inp->inp_lport || !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
 		lck_rw_done(pcbinfo->ipi_lock);
@@ -857,7 +868,7 @@ in6_pcbnotify(struct inpcbinfo *pcbinfo, struct sockaddr *dst, u_int fport_arg,
 	u_int32_t flowinfo;
 	int errno;
 
-	if ((unsigned)cmd > PRC_NCMDS || dst->sa_family != AF_INET6)
+	if ((unsigned)cmd >= PRC_NCMDS || dst->sa_family != AF_INET6)
 		return;
 
 	sa6_dst = (struct sockaddr_in6 *)(void *)dst;
@@ -1041,16 +1052,9 @@ void
 in6_losing(struct inpcb *in6p)
 {
 	struct rtentry *rt;
-	struct rt_addrinfo info;
 
 	if ((rt = in6p->in6p_route.ro_rt) != NULL) {
 		RT_LOCK(rt);
-		bzero((caddr_t)&info, sizeof (info));
-		info.rti_info[RTAX_DST] =
-		    (struct sockaddr *)&in6p->in6p_route.ro_dst;
-		info.rti_info[RTAX_GATEWAY] = rt->rt_gateway;
-		info.rti_info[RTAX_NETMASK] = rt_mask(rt);
-		rt_missmsg(RTM_LOSING, &info, rt->rt_flags, 0);
 		if (rt->rt_flags & RTF_DYNAMIC) {
 			/*
 			 * Prevent another thread from modifying rt_key,

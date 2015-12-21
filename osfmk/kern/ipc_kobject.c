@@ -131,6 +131,7 @@
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_voucher.h>
+#include <kern/sync_sema.h>
 #include <kern/counters.h>
 
 #include <vm/vm_protos.h>
@@ -265,6 +266,7 @@ ipc_kobject_server(
 	ipc_kmsg_t reply;
 	kern_return_t kr;
 	ipc_port_t *destp;
+	ipc_port_t  replyp = IPC_PORT_NULL;
 	mach_msg_format_0_trailer_t *trailer;
 	register mig_hash_t *ptr;
 
@@ -340,10 +342,10 @@ ipc_kobject_server(
 	    }
 	    else {
 		if (!ipc_kobject_notify(request->ikm_header, reply->ikm_header)){
-#if	MACH_IPC_TEST
+#if DEVELOPMENT || DEBUG
 		    printf("ipc_kobject_server: bogus kernel message, id=%d\n",
 			request->ikm_header->msgh_id);
-#endif	/* MACH_IPC_TEST */
+#endif	/* DEVELOPMENT || DEBUG */
 		    _MIG_MSGID_INVALID(request->ikm_header->msgh_id);
 
 		    ((mig_reply_error_t *) reply->ikm_header)->RetCode
@@ -418,6 +420,8 @@ ipc_kobject_server(
 		ipc_kmsg_destroy(request);
 	}
 
+	replyp = (ipc_port_t)reply->ikm_header->msgh_remote_port;
+
 	if (kr == MIG_NO_REPLY) {
 		/*
 		 *	The server function will send a reply message
@@ -427,7 +431,7 @@ ipc_kobject_server(
 		ipc_kmsg_free(reply);
 
 		return IKM_NULL;
-	} else if (!IP_VALID((ipc_port_t)reply->ikm_header->msgh_remote_port)) {
+	} else if (!IP_VALID(replyp)) {
 		/*
 		 *	Can't queue the reply message if the destination
 		 *	(the reply port) isn't valid.
@@ -435,6 +439,17 @@ ipc_kobject_server(
 
 		ipc_kmsg_destroy(reply);
 
+		return IKM_NULL;
+	} else if (replyp->ip_receiver == ipc_space_kernel) {
+		/*
+		 * Don't send replies to kobject kernel ports
+		 */
+#if DEVELOPMENT || DEBUG
+		printf("%s: refusing to send reply to kobject %d port (id:%d)\n",
+		       __func__, ip_kotype(replyp),
+		       request->ikm_header->msgh_id);
+#endif	/* DEVELOPMENT || DEBUG */
+		ipc_kmsg_destroy(reply);
 		return IKM_NULL;
 	}
 
@@ -527,51 +542,67 @@ ipc_kobject_notify(
 	mach_msg_header_t *request_header,
 	mach_msg_header_t *reply_header)
 {
+	mach_msg_max_trailer_t * trailer;
 	ipc_port_t port = (ipc_port_t) request_header->msgh_remote_port;
 
 	((mig_reply_error_t *) reply_header)->RetCode = MIG_NO_REPLY;
+
+	trailer = (mach_msg_max_trailer_t *)
+	          ((vm_offset_t)request_header + request_header->msgh_size);
+	if (0 != bcmp(&trailer->msgh_audit, &KERNEL_AUDIT_TOKEN,
+			sizeof(trailer->msgh_audit))) {
+		return FALSE;
+	}
+	if (0 != bcmp(&trailer->msgh_sender, &KERNEL_SECURITY_TOKEN,
+			sizeof(trailer->msgh_sender))) {
+		return FALSE;
+	}
+
 	switch (request_header->msgh_id) {
 		case MACH_NOTIFY_NO_SENDERS:
-		   if (ip_kotype(port) == IKOT_VOUCHER) {
-			   ipc_voucher_notify(request_header);
-			   return TRUE;
-		   }
-		   if (ip_kotype(port) == IKOT_VOUCHER_ATTR_CONTROL) {
-			   ipc_voucher_attr_control_notify(request_header);
-			   return TRUE;
-		   }
-		   if(ip_kotype(port) == IKOT_NAMED_ENTRY) {
-			ip_lock(port);
+			switch (ip_kotype(port)) {
+			case IKOT_VOUCHER:
+				ipc_voucher_notify(request_header);
+				return TRUE;
 
-			/*
-			 * Bring the sequence number and mscount in
-			 * line with ipc_port_destroy assertion.
-			 */
-			port->ip_mscount = 0;
-			port->ip_messages.imq_seqno = 0;
-			ipc_port_destroy(port); /* releases lock */
-			return TRUE;
-		   }
-		   if (ip_kotype(port) == IKOT_UPL) {
-			   upl_no_senders(
-				request_header->msgh_remote_port, 
-				(mach_port_mscount_t) 
-				((mach_no_senders_notification_t *) 
-				 request_header)->not_count);
-			   reply_header->msgh_remote_port = MACH_PORT_NULL;
-			   return TRUE;
-		   }
+			case IKOT_VOUCHER_ATTR_CONTROL:
+				ipc_voucher_attr_control_notify(request_header);
+				return TRUE;
+
+			case IKOT_SEMAPHORE:
+				semaphore_notify(request_header);
+				return TRUE;
+				
+			case IKOT_NAMED_ENTRY:
+				ip_lock(port);
+
+				/*
+				 * Bring the sequence number and mscount in
+				 * line with ipc_port_destroy assertion.
+				 */
+				port->ip_mscount = 0;
+				port->ip_messages.imq_seqno = 0;
+				ipc_port_destroy(port); /* releases lock */
+				return TRUE;
+
+			case IKOT_UPL:
+				upl_no_senders(
+					request_header->msgh_remote_port, 
+					(mach_port_mscount_t) 
+					((mach_no_senders_notification_t *) 
+					 request_header)->not_count);
+				reply_header->msgh_remote_port = MACH_PORT_NULL;
+				return TRUE;
+
 #if	CONFIG_AUDIT
-		   if (ip_kotype(port) == IKOT_AU_SESSIONPORT) {
-			   audit_session_nosenders(request_header);
-			   return TRUE;
-		   }
+			case IKOT_AU_SESSIONPORT:
+				audit_session_nosenders(request_header);
+				return TRUE;
 #endif
-		   if (ip_kotype(port) == IKOT_FILEPORT) {
-			fileport_notify(request_header);
-			return TRUE;
-		   }
-
+			case IKOT_FILEPORT:
+				fileport_notify(request_header);
+				return TRUE;
+			}
 	  	   break;
 
 		case MACH_NOTIFY_PORT_DELETED:

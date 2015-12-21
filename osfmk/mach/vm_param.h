@@ -260,21 +260,21 @@ extern vm_offset_t      vm_elinkedit;
 #define VM_KERNEL_IS_SLID(_o)						       \
 		(((vm_offset_t)(_o) >= vm_kernel_base) &&		       \
 		 ((vm_offset_t)(_o) <=  vm_kernel_top))
-#define VM_KERNEL_IS_KEXT(_o)                                                  \
-                (((vm_offset_t)(_o) >= vm_kext_base) &&                        \
+#define VM_KERNEL_IS_KEXT(_o)      \
+                (((vm_offset_t)(_o) >= vm_kext_base) &&   \
                  ((vm_offset_t)(_o) <  vm_kext_top))
 
 #define VM_KERNEL_IS_PRELINKTEXT(_o)        \
         (((vm_offset_t)(_o) >= vm_prelink_stext) &&     \
-         ((vm_offset_t)(_o) <  vm_prelink_etext))
+        ((vm_offset_t)(_o) <  vm_prelink_etext))
 
 #define VM_KERNEL_IS_PRELINKINFO(_o)        \
-        (((vm_offset_t)(_o) >= vm_prelink_sinfo) &&     \
-         ((vm_offset_t)(_o) <  vm_prelink_einfo))
+    (((vm_offset_t)(_o) >= vm_prelink_sinfo) &&     \
+    ((vm_offset_t)(_o) <  vm_prelink_einfo))
 
 #define VM_KERNEL_IS_KEXT_LINKEDIT(_o)        \
-        (((vm_offset_t)(_o) >= vm_slinkedit) &&     \
-         ((vm_offset_t)(_o) <  vm_elinkedit))
+    (((vm_offset_t)(_o) >= vm_slinkedit) &&     \
+    ((vm_offset_t)(_o) <  vm_elinkedit))
 
 #define VM_KERNEL_SLIDE(_u)						       \
 		((vm_offset_t)(_u) + vm_kernel_slide)
@@ -308,17 +308,19 @@ extern vm_offset_t      vm_elinkedit;
  * VM_KERNEL_UNSLIDE_OR_ADDRPERM:
  *     Use this macro when you are exposing an address to userspace that could
  *     come from either kernel text/data *or* the heap. This is a rare case,
- *     but one that does come up and must be handled correctly.
+ *     but one that does come up and must be handled correctly. If the argument
+ *     is known to be lower than any potential heap address, no transformation
+ *     is applied, to avoid revealing the operation on a constant.
  *
  * Nesting of these macros should be considered invalid.
  */
 #define VM_KERNEL_UNSLIDE(_v)						       \
 		((VM_KERNEL_IS_SLID(_v) ||				       \
-          VM_KERNEL_IS_KEXT(_v) ||      \
+		  VM_KERNEL_IS_KEXT(_v) ||      \
           VM_KERNEL_IS_PRELINKTEXT(_v) ||   \
           VM_KERNEL_IS_PRELINKINFO(_v) ||   \
-          VM_KERNEL_IS_KEXT_LINKEDIT(_v)) ?     \
-			(vm_offset_t)(_v) - vm_kernel_slide :		       \
+          VM_KERNEL_IS_KEXT_LINKEDIT(_v)) ?      \
+			(vm_offset_t)(_v) - vm_kernel_slide :    \
 			(vm_offset_t)(_v))
 
 #define	VM_KERNEL_ADDRPERM(_v)						       \
@@ -331,9 +333,9 @@ extern vm_offset_t      vm_elinkedit;
           VM_KERNEL_IS_KEXT(_v) ||      \
           VM_KERNEL_IS_PRELINKTEXT(_v) ||   \
           VM_KERNEL_IS_PRELINKINFO(_v) ||   \
-          VM_KERNEL_IS_KEXT_LINKEDIT(_v)) ?     \
-			(vm_offset_t)(_v) - vm_kernel_slide :		       \
-			VM_KERNEL_ADDRPERM(_v))
+          VM_KERNEL_IS_KEXT_LINKEDIT(_v)) ?         \
+			(vm_offset_t)(_v) - vm_kernel_slide :    \
+		 ((vm_offset_t)(_v) >= VM_MIN_KERNEL_AND_KEXT_ADDRESS ? VM_KERNEL_ADDRPERM(_v) : (vm_offset_t)(_v)))
 	
 
 #endif	/* XNU_KERNEL_PRIVATE */

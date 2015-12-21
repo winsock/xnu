@@ -77,7 +77,7 @@
 #include <kern/ipc_kobject.h>
 #include <kern/thread.h>
 #include <kern/misc_protos.h>
-#include <kern/wait_queue.h>
+#include <kern/waitq.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
@@ -205,7 +205,6 @@ ipc_port_request_alloc(
 				if (port->ip_impdonation != 0 &&
 				    port->ip_spimportant == 0 &&
 				    (task_is_importance_donor(current_task()))) {
-					port->ip_spimportant = 1;
 					*importantp = TRUE;
 				}
 #endif /* IMPORTANCE_INHERTANCE */
@@ -383,7 +382,6 @@ ipc_port_request_sparm(
 			    (port->ip_spimportant == 0) &&
 			    (((option & MACH_SEND_IMPORTANCE) != 0) ||
 			     (task_is_importance_donor(current_task())))) {
-				port->ip_spimportant = 1;
 				return TRUE;
 			}
 #else
@@ -547,8 +545,7 @@ ipc_port_nsrequest(
 
 void
 ipc_port_clear_receiver(
-	ipc_port_t	port,
-	queue_t		links)
+	ipc_port_t	port)
 {
 	spl_t		s;
 
@@ -557,9 +554,9 @@ ipc_port_clear_receiver(
 	/*
 	 * pull ourselves from any sets.
 	 */
-	if (port->ip_pset_count != 0) {
-		ipc_pset_remove_from_all(port, links);
-		assert(port->ip_pset_count == 0);
+	if (port->ip_in_pset != 0) {
+		ipc_pset_remove_from_all(port);
+		assert(port->ip_in_pset == 0);
 	}
 
 	/*
@@ -602,7 +599,6 @@ ipc_port_init(
 	port->ip_pdrequest = IP_NULL;
 	port->ip_requests = IPR_NULL;
 
-	port->ip_pset_count = 0;
 	port->ip_premsg = IKM_NULL;
 	port->ip_context = 0;
 
@@ -617,7 +613,8 @@ ipc_port_init(
 
 	port->ip_reserved    = 0;
 
-	ipc_mqueue_init(&port->ip_messages, FALSE /* set */);
+	ipc_mqueue_init(&port->ip_messages,
+			FALSE /* !set */, NULL /* no reserved link */);
 }
 
 /*
@@ -870,7 +867,7 @@ ipc_port_destroy(
 	assert(ip_active(port));
 	/* port->ip_receiver_name is garbage */
 	/* port->ip_receiver/port->ip_destination is garbage */
-	assert(port->ip_pset_count == 0);
+	assert(port->ip_in_pset == 0);
 	assert(port->ip_mscount == 0);
 
 	/* check for a backup port */
@@ -949,6 +946,9 @@ ipc_port_destroy(
 	mqueue = &port->ip_messages;
 	ipc_mqueue_destroy(mqueue);
 
+	/* cleanup waitq related resources */
+	ipc_mqueue_deinit(mqueue);
+
 	/* generate dead-name notifications */
 	ipc_port_dnnotify(port);
 
@@ -992,11 +992,6 @@ ipc_port_destroy(
  *		but guaranteeing that this doesn't create a circle
  *		port->ip_destination->ip_destination->... == port
  *
- *		Additionally, if port was successfully changed to "in transit",
- *		propagate boost assertions from the "in limbo" port to all
- *		the ports in the chain, and, if the destination task accepts
- *		boosts, to the destination task.
- *
  *	Conditions:
  *		No ports locked.  References held for "port" and "dest".
  */
@@ -1006,13 +1001,11 @@ ipc_port_check_circularity(
 	ipc_port_t	port,
 	ipc_port_t	dest)
 {
-	ipc_port_t base;
-
 #if IMPORTANCE_INHERITANCE
-	ipc_importance_task_t imp_task = IIT_NULL;
-	ipc_importance_task_t release_imp_task = IIT_NULL;
-	int assertcnt = 0;
-#endif /* IMPORTANCE_INHERITANCE */
+	/* adjust importance counts at the same time */
+	return ipc_importance_check_circularity(port, dest);
+#else
+	ipc_port_t base;
 
 	assert(port != IP_NULL);
 	assert(dest != IP_NULL);
@@ -1025,7 +1018,6 @@ ipc_port_check_circularity(
 	 *	First try a quick check that can run in parallel.
 	 *	No circularity if dest is not in transit.
 	 */
-
 	ip_lock(port);
 	if (ip_lock_try(dest)) {
 		if (!ip_active(dest) ||
@@ -1106,37 +1098,11 @@ ipc_port_check_circularity(
 	ip_reference(dest);
 	port->ip_destination = dest;
 
-#if IMPORTANCE_INHERITANCE
-	/* must have been in limbo or still bound to a task */
-	assert(port->ip_tempowner != 0);
-
-	/*
-	 * We delayed dropping assertions from a specific task.
-	 * Cache that info now (we'll drop assertions and the
-	 * task reference below).
-	 */
-	release_imp_task = port->ip_imp_task;
-	if (IIT_NULL != release_imp_task) {
-		port->ip_imp_task = IIT_NULL;
-	}
-	assertcnt = port->ip_impcount;
-
-	/* take the port out of limbo w.r.t. assertions */
-	port->ip_tempowner = 0;
-
-#endif /* IMPORTANCE_INHERITANCE */
-
 	/* now unlock chain */
 
 	ip_unlock(port);
 
 	for (;;) {
-
-#if IMPORTANCE_INHERITANCE
-		/* every port along chain track assertions behind it */
-		dest->ip_impcount += assertcnt;
-#endif /* IMPORTANCE_INHERITANCE */
-
 		if (dest == base)
 			break;
 
@@ -1145,10 +1111,6 @@ ipc_port_check_circularity(
 		assert(ip_active(dest));
 		assert(dest->ip_receiver_name == MACH_PORT_NULL);
 		assert(dest->ip_destination != IP_NULL);
-
-#if IMPORTANCE_INHERITANCE
-		assert(dest->ip_tempowner == 0);
-#endif /* IMPORTANCE_INHERITANCE */
 
 		port = dest->ip_destination;
 		ip_unlock(dest);
@@ -1160,63 +1122,10 @@ ipc_port_check_circularity(
 	       (base->ip_receiver_name != MACH_PORT_NULL) ||
 	       (base->ip_destination == IP_NULL));
 
-#if IMPORTANCE_INHERITANCE
-	/*
-	 * Find the task to boost (if any).
-	 * We will boost "through" ports that don't know
-	 * about inheritance to deliver receive rights that
-	 * do.
-	 */
-	if (ip_active(base) && (assertcnt > 0)) {
-		if (base->ip_tempowner != 0) {
-			if (IIT_NULL != base->ip_imp_task) {
-				/* specified tempowner task */
-				imp_task = base->ip_imp_task;
-				assert(ipc_importance_task_is_any_receiver_type(imp_task));
-			}
-			/* otherwise don't boost current task */
-
-		} else if (base->ip_receiver_name != MACH_PORT_NULL) {
-			ipc_space_t space = base->ip_receiver;
-
-			/* only spaces with boost-accepting tasks */
-			if (space->is_task != TASK_NULL &&
-			    ipc_importance_task_is_any_receiver_type(space->is_task->task_imp_base))
-				imp_task = space->is_task->task_imp_base;
-		}
-
-		/* take reference before unlocking base */
-		if (imp_task != IIT_NULL) {
-			ipc_importance_task_reference(imp_task);
-		}
-	}
-#endif /* IMPORTANCE_INHERITANCE */
-
 	ip_unlock(base);
 
-#if IMPORTANCE_INHERITANCE
-	/*
-	 * Transfer assertions now that the ports are unlocked.
-	 * Avoid extra overhead if transferring to/from the same task.
-	 */
-	boolean_t transfer_assertions = (imp_task != release_imp_task) ? TRUE : FALSE;
-
-	if (imp_task != IIT_NULL) {
-		if (transfer_assertions)
-			ipc_importance_task_hold_internal_assertion(imp_task, assertcnt);
-		ipc_importance_task_release(imp_task);
-		imp_task = IIT_NULL;
-	}
-
-	if (release_imp_task != IIT_NULL) {
-		if (transfer_assertions)
-			ipc_importance_task_drop_internal_assertion(release_imp_task, assertcnt);
-		ipc_importance_task_release(release_imp_task);
-		release_imp_task = IIT_NULL;
-	}
-#endif /* IMPORTANCE_INHERITANCE */
-
 	return FALSE;
+#endif /* !IMPORTANCE_INHERITANCE */
 }
 
 /*
@@ -1253,14 +1162,12 @@ ipc_port_impcount_delta(
 	}
 
 	absdelta = 0 - delta;		
-	//assert(port->ip_impcount >= absdelta);
-	/* if we have enough to deduct, we're done */
 	if (port->ip_impcount >= absdelta) {
 		port->ip_impcount -= absdelta;
 		return delta;
 	}
 
-#if DEVELOPMENT || DEBUG
+#if (DEVELOPMENT || DEBUG)
 	if (port->ip_receiver_name != MACH_PORT_NULL) {
 		task_t target_task = port->ip_receiver->is_task;
 		ipc_importance_task_t target_imp = target_task->task_imp_base;
@@ -1277,7 +1184,7 @@ ipc_port_impcount_delta(
 		printf("Over-release of importance assertions for port 0x%x receiver pid %d (%s), "
 		       "dropping %d assertion(s) but port only has %d remaining.\n",
 		       port->ip_receiver_name, 
-		       target_imp->iit_bsd_pid, target_imp->iit_procname,
+		       target_pid, target_procname,
 		       absdelta, port->ip_impcount);
 
 	} else if (base != IP_NULL) {
@@ -1293,14 +1200,16 @@ ipc_port_impcount_delta(
 			target_procname = "unknown";
 			target_pid = -1;
 		}
-		printf("Over-release of importance assertions for port %p "
+		printf("Over-release of importance assertions for port 0x%lx "
 		       "enqueued on port 0x%x with receiver pid %d (%s), "
 		       "dropping %d assertion(s) but port only has %d remaining.\n",
-		       port, base->ip_receiver_name, 
-		       target_imp->iit_bsd_pid, target_imp->iit_procname,
+		       (unsigned long)VM_KERNEL_UNSLIDE_OR_PERM((uintptr_t)port),
+		       base->ip_receiver_name,
+		       target_pid, target_procname,
 		       absdelta, port->ip_impcount);
 	}
 #endif
+
 	delta = 0 - port->ip_impcount;
 	port->ip_impcount = 0;
 	return delta;
@@ -1316,6 +1225,7 @@ ipc_port_impcount_delta(
  *		and if so, apply the delta.
  *	Conditions:
  *		The port is referenced and locked on entry.
+ *		Importance may be locked.
  *		Nothing else is locked.
  *		The lock may be dropped on exit.
  *		Returns TRUE if lock was dropped.
@@ -1325,6 +1235,7 @@ ipc_port_impcount_delta(
 boolean_t
 ipc_port_importance_delta_internal(
 	ipc_port_t 		port,
+	natural_t		options,
 	mach_port_delta_t	*deltap,
 	ipc_importance_task_t	*imp_task)
 {
@@ -1335,6 +1246,8 @@ ipc_port_importance_delta_internal(
 
 	if (*deltap == 0)
 		return FALSE;
+
+	assert(options == IPID_OPTION_NORMAL || options == IPID_OPTION_SENDPOSSIBLE);
 
 	base = port;
 
@@ -1359,21 +1272,27 @@ ipc_port_importance_delta_internal(
 		ipc_port_multiple_unlock();
 	}
 
-	/* unlock down to the base, adding a boost at each level */
+	/*
+	 * If the port lock is dropped b/c the port is in transit, there is a
+	 * race window where another thread can drain messages and/or fire a
+	 * send possible notification before we get here.
+	 *
+	 * We solve this race by checking to see if our caller armed the send
+	 * possible notification, whether or not it's been fired yet, and
+	 * whether or not we've already set the port's ip_spimportant bit. If
+	 * we don't need a send-possible boost, then we'll just apply a
+	 * harmless 0-boost to the port.
+	 */
+	if (options & IPID_OPTION_SENDPOSSIBLE) {
+		assert(*deltap == 1);
+		if (port->ip_sprequests && port->ip_spimportant == 0)
+			port->ip_spimportant = 1;
+		else
+			*deltap = 0;
+	}
+
+	/* unlock down to the base, adjusting boost(s) at each level */
 	for (;;) {
-		/*
-		 * JMM TODO - because of the port unlock to grab the multiple lock
-		 * above, a subsequent drop of importance could race and beat
-		 * the "previous" increase - causing the port impcount to go
-		 * negative briefly.  The defensive deduction performed by
-		 * ipc_port_impcount_delta() defeats that, and therefore can
-		 * cause an importance leak once the increase finally arrives.
-		 *
-		 * Need to rework the importance delta logic to be more like
-		 * ipc_importance_inherit_from() where it locks all it needs in
-		 * one pass to avoid any lock drops - to keep that race from
-		 * ever occuring.
-		 */
 		*deltap = ipc_port_impcount_delta(port, *deltap, base);
 
 		if (port == base) {
@@ -1442,20 +1361,19 @@ ipc_port_importance_delta_internal(
 boolean_t
 ipc_port_importance_delta(
 	ipc_port_t 		port,
+	natural_t		options,
 	mach_port_delta_t	delta)
 {
 	ipc_importance_task_t imp_task = IIT_NULL;
 	boolean_t dropped;
 
-	dropped = ipc_port_importance_delta_internal(port, &delta, &imp_task);
+	dropped = ipc_port_importance_delta_internal(port, options, &delta, &imp_task);
 
-	if (IIT_NULL == imp_task)
+	if (IIT_NULL == imp_task || delta == 0)
 		return dropped;
 
-	if (!dropped) {
-		dropped = TRUE;
+	if (!dropped)
 		ip_unlock(port);
-	}
 
 	assert(ipc_importance_task_is_any_receiver_type(imp_task));
 
@@ -1465,7 +1383,7 @@ ipc_port_importance_delta(
 		ipc_importance_task_drop_internal_assertion(imp_task, -delta);
 
 	ipc_importance_task_release(imp_task);
-	return dropped;
+	return TRUE;
 }
 #endif /* IMPORTANCE_INHERITANCE */
 
@@ -1497,7 +1415,7 @@ ipc_port_lookup_notify(
 	if ((entry->ie_bits & MACH_PORT_TYPE_RECEIVE) == 0)
 		return IP_NULL;
 
-	port = (ipc_port_t) entry->ie_object;
+	__IGNORE_WCASTALIGN(port = (ipc_port_t) entry->ie_object);
 	assert(port != IP_NULL);
 
 	ip_lock(port);
@@ -1791,7 +1709,7 @@ ipc_port_alloc_special(
 {
 	ipc_port_t port;
 
-	port = (ipc_port_t) io_alloc(IOT_PORT);
+	__IGNORE_WCASTALIGN(port = (ipc_port_t) io_alloc(IOT_PORT));
 	if (port == IP_NULL)
 		return IP_NULL;
 
@@ -1869,6 +1787,8 @@ ipc_port_finalize(
 		it_requests_free(its, requests);
 		port->ip_requests = IPR_NULL;
 	}
+
+	ipc_mqueue_deinit(&port->ip_messages);
 	
 #if	MACH_ASSERT
 	ipc_port_track_dealloc(port);
@@ -1883,8 +1803,10 @@ ipc_port_finalize(
  *	Allocation is intercepted via ipc_port_init;
  *	deallocation is intercepted via io_free.
  */
+#if 0
 queue_head_t	port_alloc_queue;
 lck_spin_t	port_alloc_queue_lock;
+#endif
 
 unsigned long	port_count = 0;
 unsigned long	port_count_warning = 20000;
@@ -1907,9 +1829,10 @@ int		db_port_walk(
 void
 ipc_port_debug_init(void)
 {
+#if 0
 	queue_init(&port_alloc_queue);
-
 	lck_spin_init(&port_alloc_queue_lock, &ipc_lck_grp, &ipc_lck_attr);
+#endif
 
 	if (!PE_parse_boot_argn("ipc_portbt", &ipc_portbt, sizeof (ipc_portbt)))
 		ipc_portbt = 0;

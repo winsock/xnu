@@ -307,9 +307,9 @@ L_common_dispatch:
 	shr	$32, %rcx
 	testl	%ecx, %ecx
 	jz	4f
-	movl	$0, %gs:CPU_TLB_INVALID
 	testl	$(1<<16), %ecx			/* Global? */
 	jz	3f
+	movl	$0, %gs:CPU_TLB_INVALID
 	mov	%cr4, %rcx	/* RMWW CR4, for lack of an alternative*/
 	and	$(~CR4_PGE), %rcx
 	mov	%rcx, %cr4
@@ -317,6 +317,7 @@ L_common_dispatch:
 	mov	%rcx, %cr4
 	jmp	4f
 3:
+	movb	$0, %gs:CPU_TLB_INVALID_LOCAL
 	mov	%cr3, %rcx
 	mov	%rcx, %cr3
 4:
@@ -1028,8 +1029,6 @@ Entry(hndl_alltraps)
 	cli					/* hold off intrs - critical section */
 	xorl	%ecx, %ecx			/* don't check if we're in the PFZ */
 
-#define CLI cli
-#define STI sti
 
 Entry(return_from_trap)
 	movq	%gs:CPU_ACTIVE_THREAD,%r15	/* Get current thread */
@@ -1067,13 +1066,13 @@ L_return_from_trap_with_ast:
 	movl	%eax, R64_RBX(%r15)	/* let the PFZ know we've pended an AST */
 	jmp	EXT(return_to_user)
 2:	
-	STI				/* interrupts always enabled on return to user mode */
+	sti				/* interrupts always enabled on return to user mode */
 
 	xor	%edi, %edi		/* zero %rdi */
 	xorq	%rbp, %rbp		/* clear framepointer */
 	CCALL(i386_astintr)		/* take the AST */
 
-	CLI
+	cli
 	mov	%rsp, %r15		/* AST changes stack, saved state */
 	xorl	%ecx, %ecx		/* don't check if we're in the PFZ */
 	jmp	EXT(return_from_trap)	/* and check again (rare) */
@@ -1159,8 +1158,6 @@ Entry(hndl_allintrs)
 	incl	%gs:CPU_INTERRUPT_LEVEL
 
 	CCALL1(interrupt, %r15)		/* call generic interrupt routine */
-
-	cli				/* just in case we returned with intrs enabled */
 
 	.globl	EXT(return_to_iret)
 LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
@@ -1417,7 +1414,6 @@ Entry(hndl_mdep_scall64)
 
 Entry(hndl_diag_scall64)
 	CCALL1(diagCall64, %r15)	// Call diagnostics
-	cli				// Disable interruptions just in case
 	test	%eax, %eax		// What kind of return is this?
 	je	1f			// - branch if bad (zero)
 	jmp	EXT(return_to_user)	// Normal return, do not check asts...

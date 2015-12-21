@@ -105,7 +105,6 @@
 
 #include <vm/vm_protos.h>
 
-
 memory_object_default_t	memory_manager_default = MEMORY_OBJECT_DEFAULT_NULL;
 decl_lck_mtx_data(,	memory_manager_default_lock)
 
@@ -538,10 +537,12 @@ vm_object_update_extent(
 	struct vm_page_delayed_work	*dwp;
 	int		dw_count;
 	int		dw_limit;
+	int 		dirty_count;
 
         dwp = &dw_array[0];
         dw_count = 0;
 	dw_limit = DELAYED_WORK_LIMIT(DEFAULT_DELAYED_WORK_LIMIT);
+	dirty_count = 0;
 
 	for (;
 	     offset < offset_end && object->resident_page_count;
@@ -555,7 +556,7 @@ vm_object_update_extent(
 			if ((data_cnt >= MAX_UPL_TRANSFER_BYTES) || (next_offset != offset)) {
 
 				if (dw_count) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -575,7 +576,7 @@ vm_object_update_extent(
 				 *	End of a run of dirty/precious pages.
 				 */
 				if (dw_count) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -596,6 +597,8 @@ vm_object_update_extent(
 				break;
 
 			case MEMORY_OBJECT_LOCK_RESULT_MUST_FREE:
+				if (m->dirty == TRUE)
+					dirty_count++;
 				dwp->dw_mask |= DW_vm_page_free;
 				break;
 
@@ -639,7 +642,7 @@ vm_object_update_extent(
 				VM_PAGE_ADD_DELAYED_WORK(dwp, m, dw_count);
 
 				if (dw_count >= dw_limit) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -647,12 +650,16 @@ vm_object_update_extent(
 			break;
 		}
 	}
+	
+	if (dirty_count) {
+		task_update_logical_writes(current_task(), (dirty_count * PAGE_SIZE), TASK_WRITE_INVALIDATED);
+	}
 	/*
 	 *	We have completed the scan for applicable pages.
 	 *	Clean any pages that have been saved.
 	 */
 	if (dw_count)
-		vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+		vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 
 	if (data_cnt) {
 	        LIST_REQ_PAGEOUT_PAGES(object, data_cnt,
@@ -1452,11 +1459,11 @@ memory_object_iopl_request(
 	upl_t			*upl_ptr,
 	upl_page_info_array_t	user_page_list,
 	unsigned int		*page_list_count,
-	int			*flags)
+	upl_control_flags_t	*flags)
 {
 	vm_object_t		object;
 	kern_return_t		ret;
-	int			caller_flags;
+	upl_control_flags_t	caller_flags;
 
 	caller_flags = *flags;
 
@@ -1611,7 +1618,7 @@ memory_object_upl_request(
 				     upl_ptr,
 				     user_page_list,
 				     page_list_count,
-				     cntrl_flags);
+				     (upl_control_flags_t)(unsigned int) cntrl_flags);
 }
 
 /*  
@@ -1649,7 +1656,7 @@ memory_object_super_upl_request(
 					   upl,
 					   user_page_list,
 					   page_list_count,
-					   cntrl_flags);
+					   (upl_control_flags_t)(unsigned int) cntrl_flags);
 }
 
 kern_return_t
@@ -1715,6 +1722,14 @@ host_default_memory_manager(
 		returned_manager = current_manager;
 		memory_object_default_reference(returned_manager);
 	} else {
+		/*
+		 *	Only allow the kernel to change the value.
+		 */
+		extern task_t kernel_task;
+		if (current_task() != kernel_task) {
+			result = KERN_NO_ACCESS;
+			goto out;
+		}
 
 		/*
 		 *	If this is the first non-null manager, start

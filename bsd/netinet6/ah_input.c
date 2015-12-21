@@ -412,8 +412,9 @@ ah4_input(struct mbuf *m, int off)
 		 * XXX more sanity checks
 		 * XXX relationship with gif?
 		 */
-		u_int8_t tos;
-		
+		u_int8_t tos, otos;
+		int sum;
+
 		if (ifamily == AF_INET6) {
 			ipseclog((LOG_NOTICE, "ipsec tunnel protocol mismatch "
 			    "in IPv4 AH input: %s\n", ipsec_logsastr(sav)));
@@ -429,8 +430,21 @@ ah4_input(struct mbuf *m, int off)
 			}
 		}
 		ip = mtod(m, struct ip *);
+		otos = ip->ip_tos;
 		/* ECN consideration. */
-		ip_ecn_egress(ip4_ipsec_ecn, &tos, &ip->ip_tos);
+		if (ip_ecn_egress(ip4_ipsec_ecn, &tos, &ip->ip_tos) == 0) {
+			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
+			goto fail;
+		}
+
+                if (otos != ip->ip_tos) {
+		    sum = ~ntohs(ip->ip_sum) & 0xffff;
+		    sum += (~otos & 0xffff) + ip->ip_tos;
+		    sum = (sum >> 16) + (sum & 0xffff);
+		    sum += (sum >> 16);  /* add carry */
+		    ip->ip_sum = htons(~sum & 0xffff);
+		} 
+
 		if (!key_checktunnelsanity(sav, AF_INET,
 			    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst)) {
 			ipseclog((LOG_NOTICE, "ipsec tunnel address mismatch "
@@ -607,7 +621,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	struct secasvar *sav = NULL;
 	u_int16_t nxt;
 	size_t stripsiz = 0;
-
+	sa_family_t ifamily;
 
 	IP6_EXTHDR_CHECK(m, off, sizeof(struct ah), {return IPPROTO_DONE;});
 	ah = (struct ah *)(void *)(mtod(m, caddr_t) + off);
@@ -816,7 +830,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		/* RFC 2402 */
 		stripsiz = sizeof(struct newah) + siz1;
 	}
-	if (ipsec6_tunnel_validate(m, off + stripsiz, nxt, sav)) {
+	if (ipsec6_tunnel_validate(m, off + stripsiz, nxt, sav, &ifamily)) {
 		ifaddr_t ifa;
 		struct sockaddr_storage addr;
 
@@ -828,6 +842,12 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		 * XXX relationship with gif?
 		 */
 		u_int32_t flowinfo;	/*net endian*/
+
+		if (ifamily == AF_INET) {
+			ipseclog((LOG_NOTICE, "ipsec tunnel protocol mismatch "
+			    "in IPv6 AH input: %s\n", ipsec_logsastr(sav)));
+			goto fail;
+		}
 
 		flowinfo = ip6->ip6_flow;
 		m_adj(m, off + stripsiz);
@@ -844,7 +864,10 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		ip6 = mtod(m, struct ip6_hdr *);
 		/* ECN consideration. */
-		ip6_ecn_egress(ip6_ipsec_ecn, &flowinfo, &ip6->ip6_flow);
+		if (ip6_ecn_egress(ip6_ipsec_ecn, &flowinfo, &ip6->ip6_flow) == 0) {
+			IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
+			goto fail;
+		}
 		if (!key_checktunnelsanity(sav, AF_INET6,
 			    (caddr_t)&ip6->ip6_src, (caddr_t)&ip6->ip6_dst)) {
 			ipseclog((LOG_NOTICE, "ipsec tunnel address mismatch "

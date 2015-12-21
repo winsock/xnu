@@ -100,12 +100,25 @@ installsrc:
 	pax -rw . $(SRCROOT)
 
 else ifeq ($(RC_ProjectName),xnu_quick_test)
+# This rule should be removed once rdar://22820602 is complete.
+default: install
+
+installhdrs:
+
+install: xnu_tests
+
+clean:
+
+installsrc:
+	pax -rw . $(SRCROOT)
+
+else ifeq ($(RC_ProjectName),xnu_tests)
 
 default: install
 
 installhdrs:
 
-install: xnu_quick_test
+install: xnu_tests
 
 clean:
 
@@ -138,19 +151,21 @@ else
 MAKEJOBS := --jobs=$(SYSCTL_HW_LOGICALCPU)
 endif
 
-TOP_TARGETS = 												\
-	clean 												\
-	installsrc 											\
-	exporthdrs 											\
-	all all_desktop all_embedded									\
-	all_release_embedded all_development_embedded 						\
-	installhdrs installhdrs_desktop installhdrs_embedded 						\
-	installhdrs_release_embedded installhdrs_development_embedded 			 	\
-	install install_desktop install_embedded 							\
-	install_release_embedded install_development_embedded 		 			\
-	installopensource 										\
-	cscope tags 											\
+TOP_TARGETS = 								\
+	clean 								\
+	installsrc 							\
+	exporthdrs 							\
+	all all_desktop all_embedded					\
+	all_release_embedded all_development_embedded 			\
+	installhdrs installhdrs_desktop installhdrs_embedded 		\
+	installhdrs_release_embedded installhdrs_development_embedded 	\
+	install install_desktop install_embedded 			\
+	install_release_embedded install_development_embedded 		\
+	installopensource 						\
+	cscope tags TAGS reindent					\
 	help
+
+DEFAULT_TARGET = all
 
 # Targets for internal build system debugging
 TOP_TARGETS += 						\
@@ -161,16 +176,21 @@ TOP_TARGETS += 						\
 	install_textfiles				\
 	install_config
 
+ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
+MAKEARGS += -B
+DEFAULT_TARGET := build
+endif
+
 .PHONY: $(TOP_TARGETS)
 
-default: all
+default: $(DEFAULT_TARGET)
 
 ifneq ($(REMOTEBUILD),)
 $(TOP_TARGETS):
 	$(_v)$(VERSDIR)/tools/remote_build.sh _REMOTEBUILD_TARGET=$@ _REMOTEBUILD_MAKE=$(MAKE) $(if $(filter --,$(MAKEFLAGS)),-,)$(MAKEFLAGS)
 else
 $(TOP_TARGETS):
-	$(_v)$(MAKE) -r $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) -f $(MakeInc_top) $@
+	$(_v)$(MAKE) $(MAKEARGS) -r $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) -f $(MakeInc_top) $@
 endif
 
 else # CURRENT_BUILD_CONFIG
@@ -194,17 +214,20 @@ INSTINC_SUBDIRS = $(ALL_SUBDIRS) EXTERNAL_HEADERS
 INSTINC_SUBDIRS_X86_64 = $(INSTINC_SUBDIRS)
 INSTINC_SUBDIRS_X86_64H = $(INSTINC_SUBDIRS)
 INSTINC_SUBDIRS_ARM = $(INSTINC_SUBDIRS)
+INSTINC_SUBDIRS_ARM64 = $(INSTINC_SUBDIRS)
 
 EXPINC_SUBDIRS = $(ALL_SUBDIRS)
 EXPINC_SUBDIRS_X86_64 = $(EXPINC_SUBDIRS)
 EXPINC_SUBDIRS_X86_64H = $(EXPINC_SUBDIRS)
 EXPINC_SUBDIRS_ARM = $(EXPINC_SUBDIRS)
+EXPINC_SUBDIRS_ARM64 = $(EXPINC_SUBDIRS)
 
 SETUP_SUBDIRS = SETUP
 
 COMP_SUBDIRS_X86_64 = $(ALL_SUBDIRS)
 COMP_SUBDIRS_X86_64H = $(ALL_SUBDIRS)
 COMP_SUBDIRS_ARM = $(ALL_SUBDIRS)
+COMP_SUBDIRS_ARM64 = $(ALL_SUBDIRS)
 
 INSTTEXTFILES_SUBDIRS =	\
 	bsd
@@ -217,11 +240,21 @@ endif # CURRENT_BUILD_CONFIG
 
 endif # all other RC_ProjectName
 
-# "xnu_quick_test" and "testbots" are targets that can be invoked via a standalone
-# "make xnu_quick_test" or via buildit/XBS with the RC_ProjectName=xnu_quick_test.
+installhdrs_libkdd install_libkdd:
+	cd libkdd; \
+		xcodebuild $(subst _libkdd,,$@) 	\
+			"SRCROOT=$(SRCROOT)/libkdd"		\
+			"OBJROOT=$(OBJROOT)" 			\
+			"SYMROOT=$(SYMROOT)" 			\
+			"DSTROOT=$(DSTROOT)"			\
+			"SDKROOT=$(SDKROOT)"
+
+
+# "xnu_tests" and "testbots" are targets that can be invoked via a standalone
+# "make xnu_tests" or via buildit/XBS with the RC_ProjectName=xnu_tests.
 # Define the target here in the outermost scope of the initial Makefile
 
-xnu_quick_test:
+xnu_tests xnu_quick_test:
 	$(MAKE) -C $(SRCROOT)/tools/tests					\
 		SRCROOT=$(SRCROOT)/tools/tests
 

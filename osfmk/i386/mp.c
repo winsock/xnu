@@ -1173,7 +1173,8 @@ mp_cpus_call_action(void)
 			mp_call_head_unlock(cqp, intrs_enabled);
 			KERNEL_DEBUG_CONSTANT(
 				TRACE_MP_CPUS_CALL_ACTION,
-				call.func, call.arg0, call.arg1, call.maskp, 0);
+				VM_KERNEL_UNSLIDE(call.func), VM_KERNEL_UNSLIDE_OR_PERM(call.arg0),
+				VM_KERNEL_UNSLIDE_OR_PERM(call.arg1), VM_KERNEL_ADDRPERM(call.maskp), 0);
 			call.func(call.arg0, call.arg1);
 			(void) mp_call_head_lock(cqp);
 		}
@@ -1237,7 +1238,7 @@ mp_cpus_call_wait(boolean_t	intrs_enabled,
 			mp_cpus_call_wait_timeout = TRUE;
 			cpus_unresponsive = cpus_called & ~(*cpus_responded);
 			mp_cpus_NMIPI(cpus_unresponsive);
-			panic("mp_cpus_call_wait() timeout, cpus: 0x%lx",
+			panic("mp_cpus_call_wait() timeout, cpus: 0x%llx",
 				cpus_unresponsive);
 		}
 	}
@@ -1265,7 +1266,7 @@ mp_cpus_call1(
 
 	KERNEL_DEBUG_CONSTANT(
 		TRACE_MP_CPUS_CALL | DBG_FUNC_START,
-		cpus, mode, VM_KERNEL_UNSLIDE(action_func), arg0, arg1);
+		cpus, mode, VM_KERNEL_UNSLIDE(action_func), VM_KERNEL_UNSLIDE_OR_PERM(arg0), VM_KERNEL_UNSLIDE_OR_PERM(arg1));
 
 	if (!smp_initialized) {
 		if ((cpus & CPUMASK_SELF) == 0)
@@ -1309,7 +1310,7 @@ mp_cpus_call1(
 				KERNEL_DEBUG_CONSTANT(
 					TRACE_MP_CPUS_CALL_LOCAL,
 					VM_KERNEL_UNSLIDE(action_func),
-					arg0, arg1, 0, 0);
+					VM_KERNEL_UNSLIDE_OR_PERM(arg0), VM_KERNEL_UNSLIDE_OR_PERM(arg1), 0, 0);
 				action_func(arg0, arg1);
 			}
 		} else {
@@ -1375,7 +1376,7 @@ mp_cpus_call1(
 	if (mode != SYNC && call_self ) {
 		KERNEL_DEBUG_CONSTANT(
 			TRACE_MP_CPUS_CALL_LOCAL,
-			VM_KERNEL_UNSLIDE(action_func), arg0, arg1, 0, 0);
+			VM_KERNEL_UNSLIDE(action_func), VM_KERNEL_UNSLIDE_OR_PERM(arg0), VM_KERNEL_UNSLIDE_OR_PERM(arg1), 0, 0);
 		if (action_func != NULL) {
 			ml_set_interrupts_enabled(FALSE);
 			action_func(arg0, arg1);

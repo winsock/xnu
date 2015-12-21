@@ -114,6 +114,11 @@ purgeable_q_t vm_purgeable_object_remove(vm_object_t object);
 /* statistics for purgable objects in all queues */
 void vm_purgeable_stats(vm_purgeable_info_t info, task_t target_task);
 
+#if DEVELOPMENT || DEBUG
+/* statistics for purgeable object usage in all queues for a task */
+kern_return_t vm_purgeable_account(task_t task, pvm_account_info_t acnt_info);
+#endif /* DEVELOPMENT || DEBUG */
+
 int vm_purgeable_purge_task_owned(task_t task);
 void vm_purgeable_nonvolatile_enqueue(vm_object_t object, task_t task);
 void vm_purgeable_nonvolatile_dequeue(vm_object_t object);
@@ -122,5 +127,17 @@ void vm_purgeable_accounting(vm_object_t	object,
 			     boolean_t		disown);
 void vm_purgeable_compressed_update(vm_object_t	object,
 				    int		delta);
+
+#define PURGEABLE_LOOP_MAX 64
+
+#define TOKEN_ADD		0x40	/* 0x100 */
+#define TOKEN_DELETE		0x41	/* 0x104 */
+#define TOKEN_RIPEN		0x42	/* 0x108 */
+#define OBJECT_ADD		0x48	/* 0x120 */
+#define OBJECT_REMOVE		0x49	/* 0x124 */
+#define OBJECT_PURGE		0x4a	/* 0x128 */
+#define OBJECT_PURGE_ALL	0x4b	/* 0x12c */
+#define OBJECT_PURGE_ONE	0x4c	/* 0x12d */
+#define OBJECT_PURGE_LOOP	0x4e	/* 0x12e */
 
 #endif /* __VM_PURGEABLE_INTERNAL__ */
